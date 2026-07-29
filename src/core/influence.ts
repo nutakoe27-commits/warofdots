@@ -16,7 +16,7 @@ import {
   INFLUENCE_CLAIM_MIN,
   INFLUENCE_CONTEST_MARGIN,
   INFLUENCE_DIAG,
-  INFLUENCE_STEP_COST,
+  UNIT_STACK_FALLOFF,
   B,
 } from './balance.ts';
 import { clamp } from './geometry.ts';
@@ -64,10 +64,14 @@ function swapHeap(a: number, b: number): void {
   heapKey[b] = k;
 }
 
+/** Key of the entry most recently returned by `heapPop`. */
+let poppedKey = 0;
+
 /** Pops the highest-value entry, returning the cell (-1 when empty). */
 function heapPop(): number {
   if (heapSize === 0) return -1;
   const top = heapCell[0]!;
+  poppedKey = heapKey[0]!;
   heapSize--;
   if (heapSize > 0) {
     heapCell[0] = heapCell[heapSize]!;
@@ -105,15 +109,32 @@ export function cellCenterY(world: World, cell: number): number {
   return (((cell / world.influence.cw) | 0) + 0.5) * COARSE_SIZE;
 }
 
+/** Distinct seeded cells for the current player, collected before any heap work. */
+let seedCells = new Int32Array(256);
+let seedCount = 0;
+
+function addSeed(cell: number): void {
+  if (seedCount >= seedCells.length) {
+    const grown = new Int32Array(seedCells.length * 2);
+    grown.set(seedCells);
+    seedCells = grown;
+  }
+  seedCells[seedCount++] = cell;
+}
+
+/**
+ * Accumulates source strength into the field, then pushes each *distinct* seeded
+ * cell once. Six hundred units share only a couple of hundred coarse cells, so
+ * pushing per unit would put several hundred immediately-stale entries on the heap.
+ */
 function seedSources(world: World, player: number, field: Float32Array, base: number): void {
+  seedCount = 0;
   for (const c of world.cities) {
     if (c.owner !== player) continue;
     const cell = cellAt(world, c.x, c.y);
     const power = B.CITY_POWER * (c.capital ? CAPITAL_POWER_MULT : 1);
-    if (power > field[base + cell]!) {
-      field[base + cell] = power;
-      heapPush(cell, power);
-    }
+    if (field[base + cell]! === 0) addSeed(cell);
+    if (power > field[base + cell]!) field[base + cell] = power;
   }
   const u = world.units;
   for (let i = 0; i < u.capacity; i++) {
@@ -122,14 +143,24 @@ function seedSources(world: World, player: number, field: Float32Array, base: nu
     // Units stack: several in one cell project more than one alone, with
     // diminishing returns so a doomstack cannot out-project a city.
     const current = field[base + cell]!;
-    const next = current > 0 ? current + B.UNIT_POWER * 0.35 : B.UNIT_POWER;
-    field[base + cell] = next;
-    heapPush(cell, next);
+    if (current === 0) addSeed(cell);
+    field[base + cell] = current > 0 ? current + B.UNIT_POWER * UNIT_STACK_FALLOFF : B.UNIT_POWER;
+  }
+  for (let i = 0; i < seedCount; i++) {
+    const cell = seedCells[i]!;
+    heapPush(cell, field[base + cell]!);
   }
 }
 
-/** Max-value Dijkstra outward from every source of one player. */
-function spreadPlayer(world: World, player: number): void {
+/**
+ * Max-value Dijkstra outward from every source of one player.
+ *
+ * Exported so the tick can rebuild one player's field per tick instead of all of
+ * them at once (see `influenceSchedule` in `sim.ts`). The cost is that at
+ * resolution time the first player's field is up to four ticks old — 200 ms, during
+ * which a unit moves an eighth of a coarse cell, so the territory map cannot tell.
+ */
+export function spreadPlayerField(world: World, player: number): void {
   const inf = world.influence;
   const cells = inf.cw * inf.ch;
   const base = player * cells;
@@ -139,21 +170,26 @@ function spreadPlayer(world: World, player: number): void {
   heapReset(cells * 4);
   seedSources(world, player, field, base);
 
-  const coarse = world.map.coarseTerrain;
+  const cost = world.map.coarseCost;
+  const cw = inf.cw;
+  const ch = inf.ch;
   while (heapSize > 0) {
     const cell = heapPop();
     const value = field[base + cell]!;
-    const cx = cell % inf.cw;
-    const cy = (cell / inf.cw) | 0;
+    // Lazy deletion: a cell improved after it was queued is already on the heap
+    // more than once, and only the best entry is worth expanding.
+    if (poppedKey !== value) continue;
+    const cx = cell % cw;
+    const cy = (cell / cw) | 0;
 
     for (let d = 0; d < 8; d++) {
       const nx = cx + NEIGH_DX[d]!;
       const ny = cy + NEIGH_DY[d]!;
-      if (nx < 0 || ny < 0 || nx >= inf.cw || ny >= inf.ch) continue;
-      const ncell = ny * inf.cw + nx;
-      const step = INFLUENCE_STEP_COST[coarse[ncell]!]!;
-      if (!Number.isFinite(step)) continue;
-      const next = value - step * (d < 4 ? 1 : INFLUENCE_DIAG);
+      if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
+      const ncell = ny * cw + nx;
+      // Impassable cells cost Infinity, so `next` becomes -Infinity and the
+      // claim test below rejects them without a separate branch.
+      const next = value - cost[ncell]! * (d < 4 ? 1 : INFLUENCE_DIAG);
       if (next <= INFLUENCE_CLAIM_MIN || next <= field[base + ncell]!) continue;
       field[base + ncell] = next;
       heapPush(ncell, next);
@@ -161,15 +197,15 @@ function spreadPlayer(world: World, player: number): void {
   }
 }
 
-const NEIGH_DX = [1, -1, 0, 0, 1, 1, -1, -1];
-const NEIGH_DY = [0, 0, 1, -1, 1, -1, 1, -1];
+const NEIGH_DX = new Int8Array([1, -1, 0, 0, 1, 1, -1, -1]);
+const NEIGH_DY = new Int8Array([0, 0, 1, -1, 1, -1, 1, -1]);
 
 /**
  * Resolves the per-player fields into a single ownership grid. A cell where the
  * leader's margin over the runner-up is thin stays neutral, which is what draws
  * the no-man's-land band along a contested front instead of a jittering seam.
  */
-function resolveOwners(world: World): void {
+export function resolveInfluenceOwners(world: World): void {
   const inf = world.influence;
   const cells = inf.cw * inf.ch;
   const players = world.map.playerCount;
@@ -201,26 +237,31 @@ function resolveOwners(world: World): void {
     inf.owner[cell] = bestP;
     inf.strength[cell] = best;
   }
+  // The renderer keys its cached territory bitmap off this, so it moves exactly
+  // when the ownership grid does and not merely when a field was refreshed.
+  inf.lastTick = world.tick;
 }
 
-/** Recomputes the influence field and the ownership grid. */
+/** Rebuilds every player's field and the ownership grid in one go. */
 export function computeInfluence(world: World): void {
-  for (let p = 1; p <= world.map.playerCount; p++) spreadPlayer(world, p);
-  resolveOwners(world);
-  world.influence.lastTick = world.tick;
+  for (let p = 1; p <= world.map.playerCount; p++) spreadPlayerField(world, p);
+  resolveInfluenceOwners(world);
 }
 
-/** Share of claimable cells owned by each player, indexed by player id. */
+/**
+ * Share of claimable cells owned by each player, indexed by player id.
+ *
+ * Impassable cells are never owned, so they only ever land in `shares[0]`, which
+ * nobody reads. That lets the loop skip the per-cell claimability test and divide
+ * by the count the map worked out at load time.
+ */
 export function territoryShares(world: World): number[] {
-  const inf = world.influence;
+  const owner = world.influence.owner;
   const shares = new Array<number>(world.players.length).fill(0);
-  let claimable = 0;
-  for (let cell = 0; cell < inf.owner.length; cell++) {
-    if (!Number.isFinite(INFLUENCE_STEP_COST[world.map.coarseTerrain[cell]!]!)) continue;
-    claimable++;
-    shares[inf.owner[cell]!]!++;
-  }
+  for (let cell = 0; cell < owner.length; cell++) shares[owner[cell]!]!++;
+  const claimable = world.map.coarseClaimable;
   if (claimable === 0) return shares;
-  for (let i = 0; i < shares.length; i++) shares[i] = shares[i]! / claimable;
+  for (let i = 1; i < shares.length; i++) shares[i] = shares[i]! / claimable;
+  shares[0] = 0;
   return shares;
 }

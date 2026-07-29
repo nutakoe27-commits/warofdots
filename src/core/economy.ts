@@ -32,22 +32,46 @@ function pocketUpkeep(world: World, pocket: Pocket): number {
   return outside * B.UPKEEP;
 }
 
-/** Spreads a delta evenly across the pocket's cities and reports the shortfall. */
+function pocketTreasury(world: World, pocket: Pocket): number {
+  let total = 0;
+  for (const ci of pocket.cities) total += world.cities[ci]!.eco;
+  return total;
+}
+
+/**
+ * Takes `amount` out of a pocket, drawing from each city in proportion to what it
+ * holds, and returns whatever could not be covered.
+ *
+ * Proportional rather than even: an even split would let one broke city report a
+ * shortfall — and so starve the whole pocket — while the city next door is sitting
+ * on a treasury.
+ */
+function withdraw(world: World, pocket: Pocket, amount: number): number {
+  if (amount <= 0) return 0;
+  const total = pocketTreasury(world, pocket);
+  if (total <= 0) return amount;
+  if (total <= amount) {
+    for (const ci of pocket.cities) world.cities[ci]!.eco = 0;
+    return amount - total;
+  }
+  let remaining = amount;
+  const last = pocket.cities.length - 1;
+  for (let i = 0; i <= last; i++) {
+    const city = world.cities[pocket.cities[i]!]!;
+    const take = i === last ? remaining : Math.min(city.eco, (city.eco / total) * amount);
+    city.eco = Math.max(0, city.eco - take);
+    remaining -= take;
+  }
+  return 0;
+}
+
+/** Applies a per-second delta to a pocket's treasury and reports the shortfall. */
 function creditPocket(world: World, pocket: Pocket, delta: number): number {
   if (pocket.cities.length === 0) return delta < 0 ? -delta : 0;
+  if (delta < 0) return withdraw(world, pocket, -delta);
   const share = delta / pocket.cities.length;
-  let debt = 0;
-  for (const ci of pocket.cities) {
-    const city = world.cities[ci]!;
-    const next = city.eco + share;
-    if (next < 0) {
-      debt -= next;
-      city.eco = 0;
-    } else {
-      city.eco = next;
-    }
-  }
-  return debt;
+  for (const ci of pocket.cities) world.cities[ci]!.eco += share;
+  return 0;
 }
 
 /**
@@ -107,19 +131,11 @@ export function stepEconomy(world: World, dt: number): void {
   applyEncirclement(world, dt);
 }
 
-/** Spends `amount` from a pocket, pulling proportionally from its cities. */
+/** Spends `amount` from a pocket. Fails, changing nothing, if it cannot afford it. */
 export function spendFromPocket(world: World, pocket: Pocket, amount: number): boolean {
-  if (pocket.eco < amount || amount <= 0) return false;
-  let remaining = amount;
-  const total = pocket.eco;
-  for (let i = 0; i < pocket.cities.length; i++) {
-    const city = world.cities[pocket.cities[i]!]!;
-    const take = i === pocket.cities.length - 1 ? remaining : Math.min(city.eco, (city.eco / total) * amount);
-    city.eco -= take;
-    if (city.eco < 0) city.eco = 0;
-    remaining -= take;
-  }
-  pocket.eco = Math.max(0, pocket.eco - amount);
+  if (amount <= 0 || pocketTreasury(world, pocket) < amount) return false;
+  withdraw(world, pocket, amount);
+  pocket.eco = pocketTreasury(world, pocket);
   return true;
 }
 

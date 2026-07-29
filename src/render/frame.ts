@@ -31,14 +31,19 @@ export function createInterpBuffer(capacity: number): InterpBuffer {
   };
 }
 
-/** Copies current positions into `buf`, to be interpolated from next frame. */
+/**
+ * Snapshots positions immediately before a tick, so the next frame can draw
+ * between this state and the new one. Called by the game loop, not by layers.
+ */
 export function captureInterp(world: World, buf: InterpBuffer): void {
   const u = world.units;
   for (let i = 0; i < u.capacity; i++) {
-    buf.valid[i] = u.alive[i]! && buf.id[i] === u.id[i]! ? 1 : 0;
     buf.x[i] = u.x[i]!;
     buf.y[i] = u.y[i]!;
-    buf.id[i] = u.id[i]!;
+    buf.valid[i] = u.alive[i]!;
+    // Slots are recycled, so the id is what says whether the snapshot in this
+    // slot describes the unit that is standing there now.
+    buf.id[i] = u.alive[i] ? u.id[i]! : 0;
   }
 }
 
@@ -68,16 +73,20 @@ export interface FrameState {
   perf: PerfCounters;
 }
 
-/** Interpolated x for a unit slot. */
+/**
+ * Interpolated position for a unit slot. A slot whose occupant changed since the
+ * snapshot is drawn at its current position rather than sliding in from wherever
+ * the previous tenant died.
+ */
 export function lerpX(frame: FrameState, slot: number): number {
   const u = frame.world.units;
-  if (!frame.interp.valid[slot]) return u.x[slot]!;
+  if (frame.interp.id[slot] !== u.id[slot]!) return u.x[slot]!;
   return frame.interp.x[slot]! + (u.x[slot]! - frame.interp.x[slot]!) * frame.alpha;
 }
 
 export function lerpY(frame: FrameState, slot: number): number {
   const u = frame.world.units;
-  if (!frame.interp.valid[slot]) return u.y[slot]!;
+  if (frame.interp.id[slot] !== u.id[slot]!) return u.y[slot]!;
   return frame.interp.y[slot]! + (u.y[slot]! - frame.interp.y[slot]!) * frame.alpha;
 }
 

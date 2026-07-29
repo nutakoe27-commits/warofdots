@@ -175,6 +175,11 @@ export const INFLUENCE_STEP_COST: number[] = [
   26, // water
   Infinity, // mountain
 ];
+/**
+ * Extra influence each additional unit in the same coarse cell contributes.
+ * Well below 1 so a doomstack cannot out-project a city just by standing still.
+ */
+export const UNIT_STACK_FALLOFF = 0.35;
 /** Diagonal steps cost this much more. */
 export const INFLUENCE_DIAG = Math.SQRT2;
 /** A cell must reach this influence to be claimed at all. */

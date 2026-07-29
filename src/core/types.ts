@@ -285,6 +285,15 @@ export interface MapRuntime {
   ch: number;
   /** Modal terrain per coarse influence cell. Drives influence spread cost. */
   coarseTerrain: Uint8Array;
+  /**
+   * Influence step cost per coarse cell, `Infinity` for impassable ones.
+   * Precomputed because the influence pass reads it about a quarter of a million
+   * times per recomputation, and `Infinity` makes the blocked case fall out of the
+   * arithmetic instead of needing a branch.
+   */
+  coarseCost: Float64Array;
+  /** Number of coarse cells anyone can ever own. Denominator for territory share. */
+  coarseClaimable: number;
   /** Tile → `cityIndex + 1`, 0 when the tile is not inside any city. */
   cityAt: Int32Array;
   playerCount: number;

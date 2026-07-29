@@ -9,7 +9,7 @@
 
 import { Terrain, TERRAIN_COUNT } from './types.ts';
 import type { MapDef, MapRuntime } from './types.ts';
-import { COARSE, TILE_SIZE } from './balance.ts';
+import { COARSE, INFLUENCE_STEP_COST, TILE_SIZE } from './balance.ts';
 import { generateTerrain } from './mapgen.ts';
 import { terrainKeyToId } from './terrain.ts';
 
@@ -85,6 +85,14 @@ export function buildMapRuntime(def: MapDef, maskTerrain?: Uint8Array): MapRunti
   const cityAt = paintCities(def, terrain, w, h);
   const cw = Math.ceil(w / COARSE);
   const ch = Math.ceil(h / COARSE);
+  const coarseTerrain = coarsenTerrain(terrain, w, h, cw, ch);
+  const coarseCost = new Float64Array(cw * ch);
+  let claimable = 0;
+  for (let i = 0; i < coarseCost.length; i++) {
+    const cost = INFLUENCE_STEP_COST[coarseTerrain[i]!]!;
+    coarseCost[i] = cost;
+    if (Number.isFinite(cost)) claimable++;
+  }
 
   const runtime: MapRuntime = {
     id: def.id,
@@ -96,7 +104,9 @@ export function buildMapRuntime(def: MapDef, maskTerrain?: Uint8Array): MapRunti
     worldH: h * TILE_SIZE,
     cw,
     ch,
-    coarseTerrain: coarsenTerrain(terrain, w, h, cw, ch),
+    coarseTerrain,
+    coarseCost,
+    coarseClaimable: claimable,
     cityAt,
     playerCount: def.players,
     def,
