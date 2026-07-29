@@ -1,0 +1,38 @@
+{
+  "id": "highlands",
+  "name": "Перевал",
+  "size": { "w": 256, "h": 208 },
+  "players": 2,
+  "heavyHint": 0.45,
+  "terrainGen": {
+    "seed": 4410932,
+    "features": [
+      { "type": "fill", "terrain": "PLAINS" },
+      { "type": "blob", "terrain": "HILLS", "x": 128, "y": 104, "radius": 26, "count": 6, "jitter": 74 },
+      { "type": "blob", "terrain": "SNOW", "x": 128, "y": 24, "radius": 20, "count": 4, "jitter": 40 },
+      { "type": "blob", "terrain": "FOREST", "x": 56, "y": 168, "radius": 17, "count": 4, "jitter": 26 },
+      { "type": "blob", "terrain": "FOREST", "x": 200, "y": 40, "radius": 17, "count": 4, "jitter": 26 },
+      { "type": "ridge", "terrain": "MOUNTAIN", "x": 128, "y": -6, "x2": 120, "y2": 78, "width": 16, "jitter": 14 },
+      { "type": "ridge", "terrain": "MOUNTAIN", "x": 132, "y": 130, "x2": 128, "y2": 214, "width": 16, "jitter": 14 },
+      { "type": "ridge", "terrain": "MOUNTAIN", "x": 40, "y": 60, "x2": 92, "y2": 30, "width": 11, "jitter": 10 },
+      { "type": "ridge", "terrain": "MOUNTAIN", "x": 216, "y": 148, "x2": 164, "y2": 178, "width": 11, "jitter": 10 },
+      { "type": "blob", "terrain": "SNOW", "x": 126, "y": 104, "radius": 13, "count": 2, "jitter": 8 },
+      { "type": "road", "terrain": "PLAINS", "x": 96, "y": 104, "x2": 160, "y2": 104, "width": 11, "jitter": 4 }
+    ]
+  },
+  "cities": [
+    { "id": "west-keep", "x": 30, "y": 104, "capital": true, "owner": 1, "radius": 7 },
+    { "id": "east-keep", "x": 226, "y": 104, "capital": true, "owner": 2, "radius": 7 },
+    { "id": "the-pass", "x": 128, "y": 104, "owner": 0, "radius": 6 },
+    { "id": "north-shoulder", "x": 66, "y": 34, "owner": 0, "radius": 5 },
+    { "id": "south-shoulder", "x": 190, "y": 174, "owner": 0, "radius": 5 },
+    { "id": "west-vale", "x": 60, "y": 172, "owner": 0, "radius": 5 },
+    { "id": "east-vale", "x": 196, "y": 36, "owner": 0, "radius": 5 }
+  ],
+  "startUnits": [
+    { "owner": 1, "kind": "light", "count": 7, "x": 42, "y": 98, "spread": 5 },
+    { "owner": 1, "kind": "heavy", "count": 3, "x": 42, "y": 112, "spread": 4 },
+    { "owner": 2, "kind": "light", "count": 7, "x": 214, "y": 110, "spread": 5 },
+    { "owner": 2, "kind": "heavy", "count": 3, "x": 214, "y": 96, "spread": 4 }
+  ]
+}
