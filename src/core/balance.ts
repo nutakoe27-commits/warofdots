@@ -154,8 +154,22 @@ export const CITY_INCOME = 12;
 export const CAPITAL_INCOME_MULT = 1.5;
 /** 🎚 ECO per second per unit outside a city. Units inside a city are free. */
 export const UPKEEP = 1.5;
-/** 🎚 Units supplied per city in the pocket. */
-export const SUPPLY_PER_CITY = 5;
+/**
+ * 🎚 Units supplied per city in the pocket.
+ *
+ * The spec's starting value was 5, and calibration says it has to be higher. At 5,
+ * every shipped map starts each player 6 units over their cap — the opening army is
+ * decaying before the first order — and two bots settle at about 2.5 cities each,
+ * which pins both armies near 11 units for the rest of the match. At that size
+ * nobody can mass enough to storm a defended city, so no match ever resolves and
+ * skill stops mattering: Маршал at 160 APM against Новобранец at 8 went 0 wins in
+ * 14 games and finished with fewer cities. A cap that binds harder than skill makes
+ * the difficulty dials inert.
+ *
+ * At 10 the opening army fits under one capital, and two bots holding 3 cities each
+ * can field 30 — enough for a real attack, and enough for micro to be worth doing.
+ */
+export const SUPPLY_PER_CITY = 10;
 /** 🎚 HP per second lost by unsupplied units over the pocket's supply cap. */
 export const STARVE_DPS = 0.03;
 /** 🎚 HP per second lost by units cut off from every friendly pocket. */
