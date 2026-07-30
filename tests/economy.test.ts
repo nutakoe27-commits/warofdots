@@ -31,6 +31,7 @@ import {
   seconds,
   slotsOf,
   splitMap,
+  tileCentre,
 } from './helpers.ts';
 
 /** Player 1's ground, clear of the capital's radius. */
@@ -154,25 +155,59 @@ describe('ECONOMY', () => {
 });
 
 describe('ENCIRCLEMENT', () => {
+  /**
+   * "Cut off" has to mean cut off. This used to strand a unit a couple of coarse
+   * cells past its own border on a 256-unit-wide map and call that encircled, which
+   * only passed because the implementation counted any ground you did not own — a
+   * front line included — as encirclement. That made encirclement the leading cause
+   * of death in the game and no attack could ever reach an enemy (ADR-024).
+   *
+   * So the wall does the work now: the unit sits on the far side of a mountain range
+   * with no city of its own behind it, which is genuinely severed, while a
+   * comparison unit at home is untouched.
+   */
   it('a unit cut off from its cities bleeds at ENCIRCLED_DPS', () => {
-    const world = makeWorld(emptyMap());
-    const stranded = placeLight(world, 1, EXILE_X, HOME_Y);
-    const watcher = placeLight(world, 2, EXILE_X + BLOCKER_GAP, HOME_Y);
+    const world = makeWorld(splitMap());
+    world.cities[1]!.owner = 0; // drop the east outpost, so the east lobe has no city
+    const stranded = placeLight(world, 1, tileCentre(44), tileCentre(10));
+    const atHome = placeLight(world, 1, tileCentre(12), tileCentre(32));
+    // Just inside PROXIMITY_R and outside contact range, so regeneration cannot
+    // claw back part of the drain being measured.
+    placeLight(world, 2, tileCentre(44), tileCentre(10) - BLOCKER_GAP);
 
-    const ticks = seconds(6);
-    runTicks(world, ticks);
-
+    const settle = seconds(1);
+    runTicks(world, settle);
     expect(world.units.encircled[stranded]!).toBe(1);
     expect(world.units.supplied[stranded]!).toBe(0);
     expect(world.units.pocket[stranded]!).toBe(-1);
     expect(pocketOfUnit(world, stranded)).toBeNull();
-    expect(world.units.inCombat[stranded]!).toBe(0);
-    expect(world.units.hp[stranded]!).toBeCloseTo(1 - ENCIRCLED_DPS * TICK_SEC * ticks, 5);
 
-    // The unit standing on its own ground ten units away is untouched.
-    expect(world.units.encircled[watcher]!).toBe(0);
-    expect(world.units.supplied[watcher]!).toBe(1);
-    expect(world.units.hp[watcher]!).toBe(1);
+    const hpAfterSettle = world.units.hp[stranded]!;
+    const ticks = seconds(6);
+    runTicks(world, ticks);
+
+    expect(world.units.inCombat[stranded]!).toBe(0);
+    expect(world.units.hp[stranded]!).toBeCloseTo(
+      hpAfterSettle - ENCIRCLED_DPS * TICK_SEC * ticks,
+      5,
+    );
+
+    // The unit standing at home on connected territory is untouched.
+    expect(world.units.encircled[atHome]!).toBe(0);
+    expect(world.units.supplied[atHome]!).toBe(1);
+    expect(world.units.hp[atHome]!).toBe(1);
+  });
+
+  it('a unit at the front, on ground nobody owns, is not treated as encircled', () => {
+    // The regression that cost the most to find: an attack has to be able to cross
+    // no-man's-land. A unit between the two territories is out of supply, not
+    // surrounded, and must not bleed at ENCIRCLED_DPS.
+    const world = makeWorld(emptyMap());
+    const forward = placeLight(world, 1, EXILE_X - BLOCKER_GAP, HOME_Y);
+    runTicks(world, seconds(4));
+
+    expect(world.units.encircled[forward]!).toBe(0);
+    expect(world.units.hp[forward]!).toBe(1);
   });
 
   it('encirclement bites harder than starvation', () => {

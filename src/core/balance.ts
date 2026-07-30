@@ -162,11 +162,17 @@ export const STARVE_DPS = 0.03;
 export const ENCIRCLED_DPS = 0.08;
 /**
  * 🎚 How far a pocket's supply reaches beyond the territory it owns, in coarse
- * cells. A front line sits on ground neither side owns, so without a band like this
- * every attack would be "encircled" the moment it left home and would bleed out
- * before making contact (ADR-024). One cell is 16 world units.
+ * cells; one cell is 16 world units, so 6 is 96.
+ *
+ * A front line sits on ground neither side owns, so without a band like this every
+ * attack is "encircled" the moment it leaves home and bleeds out before making
+ * contact. At 2 cells that was still true of any march to a contested objective:
+ * encirclement was consuming 17% of all unit-ticks and destroying more HP than the
+ * armies could build, while combat accounted for 0.1%. This is the width at which
+ * an army can cross no-man's-land to fight, and a genuine deep raid — more than
+ * 96 world units past its own border, with nothing behind it — still dies (ADR-024).
  */
-export const SUPPLY_REACH_CELLS = 2;
+export const SUPPLY_REACH_CELLS = 6;
 /** Seconds of uncontested presence needed to flip a city. */
 export const CAPTURE_SEC = 4;
 /** Capture progress decays this many times faster than it builds when contested. */
