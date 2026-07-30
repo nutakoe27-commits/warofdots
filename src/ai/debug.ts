@@ -23,6 +23,15 @@ const LOG_WINDOW_TICKS = Math.round(LOG_WINDOW_SEC / TICK_SEC);
 const LOG_MAX_ENTRIES = 24;
 /** The same message inside this many ticks is the same decision, not a new one. */
 const LOG_DEDUPE_TICKS = 20;
+/**
+ * How far back a repeat is looked for. Comparing against the newest entry alone was
+ * enough while the log was mostly mode changes, but the tactical stages interleave:
+ * the cycle, the terrain correction and the flank each report in the same tick, so
+ * every one of them is somebody else's "previous entry" and none of them dedupes.
+ * Three messages taking turns fill a 24-line panel in a little over a second and
+ * bury the strategic decisions the overlay exists to show.
+ */
+const LOG_DEDUPE_SCAN = 6;
 
 export function createBotDebug(player: number, profile: BotProfile): BotDebug {
   return {
@@ -44,8 +53,10 @@ export function createBotDebug(player: number, profile: BotProfile): BotDebug {
 /** Appends a decision, then drops whatever fell out of the window or over the cap. */
 export function logDecision(dbg: BotDebug, tick: number, text: string): void {
   const log = dbg.log;
-  const last = log[log.length - 1];
-  if (last !== undefined && last.text === text && tick - last.tick < LOG_DEDUPE_TICKS) return;
+  for (let i = log.length - 1; i >= 0 && i >= log.length - LOG_DEDUPE_SCAN; i--) {
+    const seen = log[i]!;
+    if (seen.text === text && tick - seen.tick < LOG_DEDUPE_TICKS) return;
+  }
 
   log.push({ tick, text });
   let stale = 0;

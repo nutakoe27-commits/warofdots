@@ -6,7 +6,13 @@
  * that happen, and everything the F3 overlay says about the bot's intent is read back
  * out of here.
  *
- * Four decisions shape the file.
+ * Five decisions shape the file.
+ *
+ * The attacking modes concentrate; the others do not. Splitting the frontline across every
+ * front in proportion to its priority is the right answer for PRESSURE, and it is exactly
+ * why PUSH used to achieve nothing: a bot with twice the cities and twice the income divided
+ * its army three ways and broke none of the three lines. In PUSH and SNIPE one direction gets
+ * the weight and the rest keep a screen.
  *
  * Everything is judged by *reach*. Territory is projected by cities and units, and a group
  * that walks far enough past its own ground belongs to no supply pocket at all, at which
@@ -44,6 +50,7 @@ import { slotOfId } from '../core/units.ts';
 import { GroupRole, MacroMode } from './types.ts';
 import type { Assignment, BotProfile, CityView, Front } from './types.ts';
 import type { GroupRoleId, MacroModeId, StrategicView } from './types.ts';
+import { rankCityTargets } from './strategy.ts';
 
 // ──────────────────────────────────────────────────────────────── weights ──
 // Bot coefficients live beside the code that uses them (ADR-011).
@@ -62,9 +69,11 @@ const GARRISON = { max: 5, armyCap: 0.35, valueRef: 2, capital: 1 };
  * Detachments. A snipe is a handful of lights because it has to arrive before the
  * defence does; expansion sends the smallest party that can sit on a neutral city; an
  * encirclement gets a real share of the army, since taking a neck is worth nothing if it
- * cannot then be held.
+ * cannot then be held. `freeParties` and `spare` are what a mode other than EXPAND will
+ * detach for an unclaimed city, and the army it wants before detaching anything at all.
  */
-const RAID = { snipe: 3, capture: 2, parties: 2, encircleShare: 0.35, encircleMin: 4 };
+const RAID = { snipe: 3, capture: 2, parties: 2, encircleShare: 0.35, encircleMin: 4,
+  freeParties: 1, spare: 8 };
 /**
  * Choosing who goes: priority floor so even a hopeless front keeps somebody in front of
  * it, the discount for staying where you are, the detour charged for sending the wrong
@@ -81,18 +90,12 @@ const HOLD_FLOOR = 2;
 /** Cities declared as objectives, for the overlay and the raid planner. */
 const MAX_TARGETS = 3;
 /**
- * Distance beyond my own nearest city at which an objective is worth half as much, and the
- * hard limit on how far a detached party will be sent.
- *
- * This is the number bot-vs-bot runs shouted about. Territory is projected by cities and
- * by units, and a group that walks far enough past its own ground stops being connected to
- * any pocket at all — at which point it takes `ENCIRCLED_DPS`, which is several times
- * starvation (spec §4.6). Two bots that both marched at the far side of the map spent the
- * match melting in no-man's-land without ever meeting. Expansion has to be contiguous, and
- * once the near cities are taken what is left nearby is the enemy — which is also how the
- * bots end up in contact at all.
+ * The hard limit on how far a detached party will be sent. Two or three units project
+ * almost no influence of their own, so past this distance the party arrives outside every
+ * friendly pocket and melts at `ENCIRCLED_DPS` instead of taking anything. The softer
+ * version of the same rule — objectives discounted by how far past my own ground they lie
+ * — is `rankCityTargets`' business, one layer up.
  */
-const REACH_SCALE = 260;
 const RAID_REACH = 340;
 /**
  * How far a cut is still worth taking. Perception will happily find an articulation cell
@@ -103,26 +106,18 @@ const RAID_REACH = 340;
  * Larger than `RAID_REACH` because a group this size projects influence of its own.
  */
 const ENCIRCLE_REACH = 420;
-
 /**
- * How each macro mode reads the city list; ownership picks the row. A zero weight drops
- * that class of city entirely, so DEFEND never declares an enemy capital an objective and
- * SNIPE never bothers with my own back line. `urgency` is signed: on my cities it is
- * pressure to defend, on theirs it is how well covered they are, which is why the raiding
- * modes weight it negative.
+ * Concentration. Spec §5.1 asks PUSH to «концентрирует силы на одном направлении, ломает
+ * фронт», and `weight` is how much heavier the chosen direction counts when the frontline is
+ * split — enough that every other front is left with the one-unit floor `quotaOf` keeps.
+ * Spreading proportionally is PRESSURE's job; doing it in PUSH is what made PUSH toothless,
+ * because an army divided evenly across three fronts breaks none of them.
+ *
+ * `win` and `prize` choose the direction: the most winnable front with something takeable
+ * behind it. `hold` is hysteresis — front ids are positions in a list perception re-sorts
+ * every pass, so the axis is remembered as a point on the map instead.
  */
-interface TargetWeights {
-  own: number; neutral: number; enemy: number; urgency: number;
-}
-
-const TARGET_W: Record<MacroModeId, TargetWeights> = {
-  [MacroMode.Expand]: { own: 0.2, neutral: 1.4, enemy: 0.4, urgency: -0.4 },
-  [MacroMode.Defend]: { own: 1.5, neutral: 0.2, enemy: 0, urgency: 1 },
-  [MacroMode.Pressure]: { own: 0.6, neutral: 1, enemy: 0.9, urgency: 0.2 },
-  [MacroMode.Push]: { own: 0.2, neutral: 0.6, enemy: 1.5, urgency: -0.2 },
-  [MacroMode.Encircle]: { own: 0.3, neutral: 0.7, enemy: 1.2, urgency: 0 },
-  [MacroMode.Snipe]: { own: 0, neutral: 0.8, enemy: 1.2, urgency: -0.6 },
-};
+const FOCUS = { weight: 6, win: 0.6, prize: 1.2, prizeScale: 200, hold: 140, keep: 0.5 };
 
 // ──────────────────────────────────────────────────────── module scratch ──
 
@@ -156,10 +151,14 @@ export interface OperationsState {
   encircleCell: number;
   reserveTarget: number;
   lastPlanTick: number;
+  /** Where the last PUSH decided to break through, or -1. World units, not a front id. */
+  focusX: number;
+  focusY: number;
 }
 
 export function createOperations(): OperationsState {
-  return { assignments: new Map(), targetCities: [], encircleCell: -1, reserveTarget: 0, lastPlanTick: -1 };
+  return { assignments: new Map(), targetCities: [], encircleCell: -1, reserveTarget: 0,
+    lastPlanTick: -1, focusX: -1, focusY: -1 };
 }
 
 export function assignmentFor(state: OperationsState, unitId: number): Assignment | undefined {
@@ -172,6 +171,8 @@ interface Plan {
   state: OperationsState;
   /** Front the mistake dice picked to over-commit to, or -1. */
   overcommit: number;
+  /** Front PUSH is massing on, or -1 when the army spreads by priority. */
+  focus: number;
 }
 
 /** One job: what role, where it belongs, and who is fit to do it. */
@@ -334,31 +335,17 @@ function supportDist(view: StrategicView, c: CityView): number {
   return home === null ? 0 : Math.sqrt(dist2(c.x, c.y, home.x, home.y));
 }
 
-function urgencyOf(view: StrategicView, c: CityView): number {
-  return c.owner === view.me
-    ? c.threat / (c.threat + c.myPressure + HOLD_FLOOR)
-    : c.enemyPressure / (c.enemyPressure + HOLD_FLOOR);
-}
-
 /**
- * The cities this mode is playing for, best first. Deliberately a smaller reading than
- * the strategic one: operations only needs somewhere to march.
+ * The cities this mode is playing for, best first. The scoring is `rankCityTargets`', so
+ * strategy and operations cannot drift apart on what the objective is — including the
+ * victory arithmetic, which is what makes an enemy capital an objective once the bot is
+ * ahead. Operations adds only the two things that are its own business: how many objectives
+ * to declare at once, and not turning the army round when the top two swap places.
  */
-function rankTargets(view: StrategicView, mode: MacroModeId, prev: number[]): number[] {
-  const w = TARGET_W[mode];
-  const scored: { index: number; score: number }[] = [];
-  for (const c of view.cities) {
-    let own = 0;
-    if (c.owner === view.me) own = w.own;
-    else if (c.owner === 0) own = w.neutral;
-    else if (view.enemies.includes(c.owner)) own = w.enemy;
-    if (own <= 0) continue;
-    const reach = 1 / (1 + supportDist(view, c) / REACH_SCALE);
-    scored.push({ index: c.index, score: own * c.value * reach + w.urgency * urgencyOf(view, c) });
-  }
-  scored.sort((a, b) => b.score - a.score || a.index - b.index);
-  if (scored.length > MAX_TARGETS) scored.length = MAX_TARGETS;
-  const list = scored.map((s) => s.index);
+function rankTargets(view: StrategicView, mode: MacroModeId, profile: BotProfile,
+  prev: number[]): number[] {
+  const list = rankCityTargets(view, mode, profile);
+  if (list.length > MAX_TARGETS) list.length = MAX_TARGETS;
   // Hysteresis on the objective itself: while the city the army is already marching on is
   // still one of the best few, it stays the objective. Strategy re-scores twice a second,
   // and taking the new leader every time is how a bot turns its army round on the spot.
@@ -388,13 +375,19 @@ function planBreakout(plan: Plan): void {
   }
 }
 
+/**
+ * «риск потери × ценность» — and no risk means no garrison, capital included. A city with
+ * nothing inside `THREAT_R` is held by the territory it projects, not by the dots standing
+ * in it, and units parked in a quiet back city are the army the frozen bot never brought
+ * to the front. An approach shows up as threat long before it arrives, and this runs at
+ * 4 Hz, so the garrison forms again while the enemy is still walking.
+ */
 function garrisonNeed(c: CityView): number {
+  if (c.threat <= 0) return 0;
   const risk = c.threat / (c.threat + c.myPressure + HOLD_FLOOR);
   const worth = clamp(c.value / GARRISON.valueRef, 0, 1);
-  let need = Math.round(risk * worth * GARRISON.max);
-  if (c.capital) need = Math.max(need, GARRISON.capital);
-  else if (c.threat > 0) need = Math.max(need, 1);
-  return Math.min(need, GARRISON.max);
+  const floor = c.capital ? GARRISON.capital : 1;
+  return Math.min(Math.max(Math.round(risk * worth * GARRISON.max), floor), GARRISON.max);
 }
 
 function planGarrisons(plan: Plan): void {
@@ -435,18 +428,31 @@ function planEncircle(plan: Plan): void {
   }
 }
 
-/** SNIPE takes a weakly held city with lights; EXPAND walks parties onto the neutrals. */
+/**
+ * SNIPE takes a weakly held city with lights; EXPAND walks parties onto the neutrals — and
+ * every other mode still detaches one party for a free city it can reach.
+ *
+ * That last clause is `majorityShare` arithmetic. An unclaimed city is income, supply and a
+ * step toward the victory line for the price of walking onto it, and 40-minute runs found
+ * two of them sitting neutral while a bot six cities up spent the whole match pushing at a
+ * capital it could not have converted anyway. DEFEND is excluded and a small army is
+ * excluded: two bodies out of eight is a hole in the line, not a detachment.
+ */
 function planRaids(plan: Plan): void {
   const snipe = plan.mode === MacroMode.Snipe;
-  if (!snipe && plan.mode !== MacroMode.Expand) return;
+  const grab = plan.mode !== MacroMode.Defend && poolLen >= RAID.spare;
+  const maxParties =
+    snipe ? 1 : plan.mode === MacroMode.Expand ? RAID.parties : grab ? RAID.freeParties : 0;
+  if (maxParties === 0) return;
+
   const want = job(GroupRole.Raid, -1, snipe);
   let parties = 0;
   for (const index of plan.state.targetCities) {
+    if (parties >= maxParties) break;
     const c = plan.view.cities[index]!;
     const eligible = snipe ? c.owner !== plan.view.me && c.owner !== 0 : c.owner === 0;
     // A party sent past `RAID_REACH` is a party that dies of encirclement on the way.
-    if (!eligible || parties >= (snipe ? 1 : RAID.parties)) continue;
-    if (supportDist(plan.view, c) > RAID_REACH) continue;
+    if (!eligible || supportDist(plan.view, c) > RAID_REACH) continue;
     want.city = index;
     if (take(plan, want, c.x, c.y, snipe ? RAID.snipe : RAID.capture) > 0) parties++;
   }
@@ -470,9 +476,54 @@ function reservePoint(plan: Plan, front: Front, out: Spot): void {
   out.y = front.y + (dy / len) * RESERVE.standoff;
 }
 
+/** Distance to the nearest declared objective I do not already hold, or Infinity. */
+function prizeDist(plan: Plan, front: Front): number {
+  let best = Infinity;
+  for (const index of plan.state.targetCities) {
+    const c = plan.view.cities[index]!;
+    if (c.owner === plan.view.me) continue;
+    best = Math.min(best, dist2(front.x, front.y, c.x, c.y));
+  }
+  // `Math.sqrt(Infinity)` is Infinity, which the caller's falloff reads as "no prize here".
+  return Math.sqrt(best);
+}
+
+/**
+ * The one direction an attack commits to: the front it is already winning, with a city it
+ * can actually take behind it. A front with no takeable city behind it can still be chosen,
+ * because a breakthrough has to happen somewhere.
+ *
+ * PUSH and SNIPE both concentrate. DEFEND has to answer every threat and PRESSURE is
+ * *supposed* to spread, but SNIPE is an attack with a raiding party attached — the three
+ * lights are `planRaids`' business, and what the rest of the army does is the same problem
+ * PUSH has. Runs show the two modes alternating under hysteresis while the board stays won,
+ * and concentration that switched itself off every other decision would be no fix at all.
+ */
+function pickFocus(plan: Plan): number {
+  // The axis is left in state on purpose when the mode moves off an attack: a bot that comes
+  // back to PUSH after an interlude of DEFEND should come back to the same direction.
+  if (plan.mode !== MacroMode.Push && plan.mode !== MacroMode.Snipe) return -1;
+  const st = plan.state;
+  let best = -1, bestScore = -Infinity;
+  for (const f of plan.view.fronts) {
+    const held = st.focusX >= 0 && dist2(f.x, f.y, st.focusX, st.focusY) <= FOCUS.hold ** 2;
+    const score =
+      f.priority +
+      FOCUS.win * clamp((f.ratio - 0.5) * 2, 0, 1) +
+      FOCUS.prize / (1 + prizeDist(plan, f) / FOCUS.prizeScale) +
+      (held ? FOCUS.keep : 0);
+    if (score > bestScore) { bestScore = score; best = f.id; }
+  }
+  const f = plan.view.fronts[best];
+  st.focusX = f === undefined ? -1 : f.x;
+  st.focusY = f === undefined ? -1 : f.y;
+  return best;
+}
+
 function frontWeight(plan: Plan, front: Front): number {
   const base = Math.max(PICK.frontMin, front.priority);
-  return front.id === plan.overcommit ? base * OVERCOMMIT : base;
+  const massed = front.id === plan.focus ? base * FOCUS.weight : base;
+  return front.id === plan.overcommit ? massed * OVERCOMMIT : massed;
 }
 
 /** Splits `total` units across the fronts by priority; the last front takes the remainder. */
@@ -555,7 +606,7 @@ export function planOperations(
   }
   buildPool(world, view.me);
   state.lastPlanTick = world.tick;
-  state.targetCities = rankTargets(view, mode, state.targetCities);
+  state.targetCities = rankTargets(view, mode, profile, state.targetCities);
   if (poolLen === 0) {
     state.reserveTarget = 0;
     state.encircleCell = -1;
@@ -571,7 +622,8 @@ export function planOperations(
     overcommit = worst.id;
   }
 
-  const plan: Plan = { world, view, mode, profile, state, overcommit };
+  const plan: Plan = { world, view, mode, profile, state, overcommit, focus: -1 };
+  plan.focus = pickFocus(plan);
   planBreakout(plan);
   planGarrisons(plan);
   planEncircle(plan);

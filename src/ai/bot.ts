@@ -8,11 +8,17 @@
  * eight actions a second and therefore cannot micro an army even when it knows
  * exactly what it should do.
  *
- * Reaction delay is modelled honestly. Perception produces a view, and the bot
- * keeps acting on the *previous* one until the profile's delay has elapsed. The
- * stale view is why a bot's unit lists are unit ids rather than slots: by the time
- * the bot acts on a front, some of the units it saw there may be dead, and every
- * consumer has to cope with that (ADR-020).
+ * Reaction delay is modelled honestly: the bot acts on a picture of the world that
+ * is `reactionDelayMs` old. Perception queues views as it builds them, and each
+ * tick the bot adopts the newest one that has aged past its delay. The stale view
+ * is why a bot's unit lists are unit ids rather than slots — by the time the bot
+ * acts on a front, some of the units it saw there may be dead, and every consumer
+ * has to cope with that (ADR-020).
+ *
+ * Adoption is checked every tick rather than only when perception runs. That is
+ * what keeps the fast end of the dial meaningful: with a 500 ms perception cadence,
+ * checking only on perception ticks would collapse 80 ms, 150 ms and 300 ms into
+ * the same 500 ms of staleness.
  */
 
 import type { Command, RngState, World } from '../core/types.ts';
@@ -37,6 +43,16 @@ const OPS_INTERVAL = 5;
 const ECO_INTERVAL = 20;
 /** Seconds of unspent actions a bot may bank, so a lull does not fund a burst. */
 const APM_BANK_SEC = 1.5;
+/**
+ * Cap on queued views. The slowest profile needs `ceil(900ms / 500ms) + 1 = 3`;
+ * the cap only matters if a caller stops calling `think` for a while.
+ */
+const MAX_QUEUED_VIEWS = 4;
+
+interface QueuedView {
+  view: StrategicView;
+  tick: number;
+}
 
 interface BotRuntime {
   player: number;
@@ -47,9 +63,8 @@ interface BotRuntime {
   ops: OperationsState;
   tactics: TacticsState;
   dbg: BotDebug;
-  /** View waiting out the reaction delay. */
-  pending: StrategicView | null;
-  pendingTick: number;
+  /** Views waiting out the reaction delay, oldest first. */
+  queue: QueuedView[];
   /** View the bot is currently acting on. */
   active: StrategicView | null;
   mode: MacroModeId;
@@ -69,23 +84,42 @@ function phaseOffset(player: number, interval: number): number {
   return (player * 3) % interval;
 }
 
+/**
+ * Takes the newest queued view that has aged past the profile's reaction delay, or
+ * null when none has. Everything older is discarded with it — a bot that fell
+ * behind should skip to the most recent picture it is entitled to, not replay a
+ * backlog of stale ones.
+ */
+function dueView(rt: BotRuntime, w: World): StrategicView | null {
+  let take = -1;
+  for (let i = 0; i < rt.queue.length; i++) {
+    if ((w.tick - rt.queue[i]!.tick) * TICK_MS < rt.profile.reactionDelayMs) break;
+    take = i;
+  }
+  if (take < 0) return null;
+  const chosen = rt.queue[take]!.view;
+  rt.queue.splice(0, take + 1);
+  return chosen;
+}
+
 function refreshView(rt: BotRuntime, w: World): void {
   if (w.tick % STRATEGY_INTERVAL === rt.stratOffset) {
-    rt.pending = perceive(w, rt.player, rt.profile, rt.perception);
-    rt.pendingTick = w.tick;
+    rt.queue.push({ view: perceive(w, rt.player, rt.profile, rt.perception), tick: w.tick });
+    if (rt.queue.length > MAX_QUEUED_VIEWS) rt.queue.shift();
   }
-  if (rt.pending === null) return;
-  const waited = (w.tick - rt.pendingTick) * TICK_MS;
-  if (waited < rt.profile.reactionDelayMs && rt.active !== null) return;
 
-  rt.active = rt.pending;
-  rt.pending = null;
-  const next = chooseMode(rt.active, rt.profile, rt.strategy, rt.rng);
-  if (next !== rt.mode) {
-    logDecision(rt.dbg, w.tick, `режим: ${rt.mode} → ${next}`);
-    rt.mode = next;
+  // The opening move is an exception: with nothing to act on yet, waiting out the
+  // delay would leave the bot idle rather than merely slow.
+  const next = rt.active === null ? (rt.queue.shift()?.view ?? null) : dueView(rt, w);
+  if (next === null) return;
+  rt.active = next;
+
+  const mode = chooseMode(rt.active, rt.profile, rt.strategy, rt.rng);
+  if (mode !== rt.mode) {
+    logDecision(rt.dbg, w.tick, `режим: ${rt.mode} → ${mode}`);
+    rt.mode = mode;
   }
-  rt.dbg.mode = next;
+  rt.dbg.mode = mode;
   rt.dbg.modeScores = rt.strategy.scores;
   rt.dbg.fronts = rt.active.fronts;
 }
@@ -164,8 +198,7 @@ export function createBot(world: World, player: number, profile: BotProfile, see
     ops: createOperations(),
     tactics: createTactics(),
     dbg: createBotDebug(player, profile),
-    pending: null,
-    pendingTick: -1,
+    queue: [],
     active: null,
     mode: MacroMode.Expand,
     bank: 0,
