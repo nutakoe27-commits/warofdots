@@ -93,7 +93,12 @@ function idealThreshold(view: StrategicView): number {
   return THRESHOLD_MIN + (1 - THRESHOLD_MIN) * condition;
 }
 
-/** Terrain first, then the enemy's mix, then how tight supply is. */
+/**
+ * Terrain sets the scale, the enemy's mix and supply pressure modulate it — and they do so
+ * *multiplicatively*, which matters. Added on, a tight-supply nudge and a counter-pick
+ * would together triple the 0.1 a forest map asks for, and heavies in a forest deal a third
+ * of their damage (spec §4.1). The map author's hint has to survive both adjustments.
+ */
 function idealHeavyShare(world: World, view: StrategicView): number {
   const hint = world.map.def.heavyHint;
   const terrain = hint ?? HEAVY_OPEN_MAX * (1 - clamp(view.roughShare, 0, 1));
@@ -106,7 +111,7 @@ function idealHeavyShare(world: World, view: StrategicView): number {
   const tight =
     cap > 0 ? 1 - clamp(view.myArmy.supplyHeadroom / (cap * HEADROOM_REF), 0, 1) : 0;
 
-  return clamp(terrain + counter + tight * SUPPLY_HEAVY_W, 0, HEAVY_HARD_CAP);
+  return clamp(terrain * (1 + counter + tight * SUPPLY_HEAVY_W), 0, HEAVY_HARD_CAP);
 }
 
 /** How close a city is to being lost, from what the bot can see standing on it. */

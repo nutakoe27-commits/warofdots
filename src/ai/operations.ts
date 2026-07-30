@@ -6,7 +6,15 @@
  * that happen, and everything the F3 overlay says about the bot's intent is read back
  * out of here.
  *
- * Three decisions shape the file.
+ * Four decisions shape the file.
+ *
+ * Everything is judged by *reach*. Territory is projected by cities and units, and a group
+ * that walks far enough past its own ground belongs to no supply pocket at all, at which
+ * point it takes `ENCIRCLED_DPS` — several times starvation (spec §4.6). So objectives are
+ * discounted by distance from my nearest city, parties have a hard range, and a cut has to
+ * be reachable before it is worth taking. Without that, two bots march past each other at
+ * opposite ends of the map and dissolve in no-man's-land without ever making contact; it is
+ * the single change that did most for how these bots play.
  *
  * Assignments are *reused*. One that comes out the same keeps its old `since` tick,
  * because tactics treats a fresh `since` as permission to re-order the unit; a plan that
