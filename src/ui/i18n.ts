@@ -52,7 +52,8 @@ const RU: Record<string, string> = {
   'victory.hint.CAPITAL_AND_MAJORITY':
     'Взять вражескую столицу и держать не меньше 80% городов карты.',
   'victory.hint.ANNIHILATION': 'Уничтожить все вражеские юниты и забрать все города.',
-  'victory.hint.TIMED_SCORE': 'Когда время выйдет, побеждают очки: города ×10, юниты ×1, территория.',
+  'victory.hint.TIMED_SCORE':
+    'Когда время выйдет, побеждают очки: города ×10, юниты ×1, территория.',
 
   'slot.human': 'Игрок',
   'slot.bot': 'Бот',
@@ -89,7 +90,8 @@ const RU: Record<string, string> = {
   'keys.title': 'Горячие клавиши',
   'keys.row.select': 'ЛКМ — выделить, перетаскивание — лассо, Shift — добавить',
   'keys.row.path': 'ПКМ — путь: клик даёт прямую, перетаскивание — кривую',
-  'keys.row.orders': 'S — стоп, C — сбросить приказы, Ctrl+A / Ctrl+H / Ctrl+L — все / тяжёлые / лёгкие',
+  'keys.row.orders':
+    'S — стоп, C — сбросить приказы, Ctrl+A / Ctrl+H / Ctrl+L — все / тяжёлые / лёгкие',
   'keys.row.groups': 'Ctrl+1…9 — назначить группу, 1…9 — выбрать',
   'keys.row.camera': 'Камера: A / W / D / X и стрелки, колесо — зум, край экрана — прокрутка',
   'keys.row.debug': 'Space — пауза, + / − — скорость, F3 — оверлей бота, F4 — отладка, Esc — меню',

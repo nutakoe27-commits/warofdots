@@ -40,7 +40,8 @@ const GRID_LINES = 4;
 const X_LABELS = 3;
 const LABEL_DY = 4;
 const AXIS_GAP = 8;
-const NICE_STEPS = [1, 2, 2.5, 5, 10] as const;
+/** Axis maxima worth rounding to. `3` is in there so a 27-unit army does not get a 50-unit axis. */
+const NICE_STEPS = [1, 2, 2.5, 3, 5, 10] as const;
 
 interface Line {
   /** Column in a history row, which is also the player id. */
@@ -242,7 +243,11 @@ function buildTable(world: World, viewer: number, lines: Line[]): HTMLElement {
     body.append(row);
   }
   table.append(body);
-  return table;
+  // Eight columns will not always fit a narrow card, and the card must not be the
+  // thing that scrolls sideways.
+  const wrap = el('div', 'df-table-wrap');
+  wrap.append(table);
+  return wrap;
 }
 
 /** Win / lose / draw from the viewer's seat, plus the winners by name. */
@@ -254,7 +259,9 @@ function verdictOf(world: World, viewer: number, lines: Line[]): { title: string
     .join(', ');
   const who = names === '' ? '' : t('end.winner', { names });
   if (outcome.team < 0) return { title: t('end.draw'), who };
-  const seat = world.players[viewer];
+  // A bot-versus-bot match has no seat to judge from: player 0 is the neutral owner,
+  // whose team is 0 and would read as a loss for a spectator.
+  const seat = viewer > 0 ? world.players[viewer] : undefined;
   if (!seat) return { title: t('end.over'), who };
   return { title: outcome.team === seat.team ? t('end.win') : t('end.lose'), who };
 }

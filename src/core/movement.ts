@@ -30,6 +30,8 @@ const neighbours = new Int32Array(512);
 
 /** Desired velocity for a unit, written into `desired`. */
 const desired = { x: 0, y: 0, speed: 0 };
+/** Fractions of a formation offset to try before giving up and hugging the centreline. */
+const LATERAL_FALLBACKS = [1, 0.6, 0.3];
 
 function currentSpeed(world: World, slot: number): number {
   const u = world.units;
@@ -37,6 +39,32 @@ function currentSpeed(world: World, slot: number): number {
   const terrain = terrainAt(world.map, u.x[slot]!, u.y[slot]!);
   const base = B.UNIT_SPEED * B.KIND_SPEED[kind]! * speedMul(terrain, kind);
   return u.inCombat[slot] ? base * COMBAT_SPEED_MULT : base;
+}
+
+/**
+ * Shrinks a formation's lateral offset when it would put the unit somewhere it has
+ * no business being.
+ *
+ * A wide line crossing a nine-tile bridge would otherwise walk its flank files
+ * straight into the river: the centreline is on the bridge, but ±18 world units of
+ * spread is not. Rather than refuse the order, the offset collapses toward the
+ * centreline, so the formation narrows to cross and spreads again on the far side.
+ */
+function usableLateral(world: World, slot: number, lateral: number): number {
+  if (lateral === 0) return 0;
+  const kind = world.units.kind[slot]!;
+  // A ship is already in the water; only foot units need protecting from it.
+  const avoidWater = !isShip(kind);
+  const nx = -sample.ty;
+  const ny = sample.tx;
+  for (let i = 0; i < LATERAL_FALLBACKS.length; i++) {
+    const scaled = lateral * LATERAL_FALLBACKS[i]!;
+    const t = terrainAt(world.map, sample.x + nx * scaled, sample.y + ny * scaled);
+    if (t === Terrain.Mountain) continue;
+    if (avoidWater && t === Terrain.Water) continue;
+    return scaled;
+  }
+  return 0;
 }
 
 function computeDesired(world: World, slot: number): void {
@@ -49,7 +77,7 @@ function computeDesired(world: World, slot: number): void {
 
   const total = pathLength(world.paths, pathIdx);
   samplePath(world.paths, pathIdx, u.pathPos[slot]! + PATH_LOOKAHEAD, sample);
-  const lateral = u.lateral[slot]!;
+  const lateral = usableLateral(world, slot, u.lateral[slot]!);
   const tx = sample.x + -sample.ty * lateral;
   const ty = sample.y + sample.tx * lateral;
 
