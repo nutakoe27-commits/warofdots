@@ -18,12 +18,28 @@ const DX = [1, -1, 0, 0, 1, 1, -1, -1];
 const DY = [0, 0, 1, -1, 1, -1, 1, -1];
 const DIAG = Math.SQRT2;
 
-/** Node budget per request. 12k tiles is plenty for a 256² map at operational scale. */
-export const DEFAULT_NODE_BUDGET = 12000;
+/**
+ * Node budget per request. With the closed set in place a tile is expanded at most
+ * once, so this is a real bound on work rather than a guess: 40k covers a
+ * corner-to-corner route on a 256² map that has to thread a chokepoint.
+ */
+export const DEFAULT_NODE_BUDGET = 40000;
 
 let gScore = new Float32Array(0);
 let cameFrom = new Int32Array(0);
 let stamp = new Int32Array(0);
+/**
+ * Generation marker for tiles already expanded. The octile heuristic never
+ * overestimates (plains cost 1.0 is the cheapest step), so once a tile is popped its
+ * distance is final and re-expanding it is pure waste.
+ *
+ * Without this the duplicate heap entries left by lazy deletion were re-expanded
+ * over and over: a capital-to-capital route on `quadrant` burned through 200 000
+ * expansions without ever reaching its goal, and then silently returned a
+ * best-effort stub that stopped less than half way. Bots dutifully marched to the
+ * end of the stub and stood there.
+ */
+let closed = new Int32Array(0);
 let generation = 0;
 let heapNode = new Int32Array(4096);
 let heapKey = new Float32Array(4096);
@@ -34,6 +50,7 @@ function ensureGrids(cells: number): void {
   gScore = new Float32Array(cells);
   cameFrom = new Int32Array(cells);
   stamp = new Int32Array(cells);
+  closed = new Int32Array(cells);
   generation = 0;
 }
 
@@ -161,6 +178,8 @@ export function findPath(
     if (node === goalTile) {
       return { pts: reconstruct(map, startTile, goalTile), complete: true, expanded };
     }
+    if (closed[node] === generation) continue;
+    closed[node] = generation;
     expanded++;
     const nx = node % map.w;
     const ny = (node / map.w) | 0;
@@ -182,6 +201,7 @@ export function findPath(
         const b = pathCost(map.terrain[ty * map.w + nx]!, kind);
         if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
       }
+      if (closed[next] === generation) continue;
       const tentative = gScore[node]! + step * (d >= 4 ? DIAG : 1);
       if (stamp[next] === generation && tentative >= gScore[next]!) continue;
       stamp[next] = generation;

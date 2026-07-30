@@ -204,6 +204,13 @@ export interface InfluenceState {
   lastTick: number;
   /** Per-player influence field, `playerCount + 1` planes of `cw × ch`. */
   field: Float32Array;
+  /**
+   * Supply reach: `playerCount + 1` planes of `cw × ch` holding `pocketId + 1`,
+   * or 0. A pocket reaches its own cells plus a band of `SUPPLY_REACH_CELLS`
+   * around them, which is what lets an army fight on ground it does not own
+   * without being treated as cut off (ADR-024).
+   */
+  reach: Int32Array;
 }
 
 // ────────────────────────────────────────────────────────── spatial hash ──

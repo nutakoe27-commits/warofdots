@@ -9,7 +9,7 @@
  */
 
 import type { Pocket, World } from './types.ts';
-import { B } from './balance.ts';
+import { B, SUPPLY_REACH_CELLS } from './balance.ts';
 import { cellAt } from './influence.ts';
 import { cityAt } from './terrain.ts';
 
@@ -116,6 +116,58 @@ function markSupplied(world: World, pockets: Pocket[]): void {
 }
 
 /**
+ * Dilates every working pocket outward by `SUPPLY_REACH_CELLS`.
+ *
+ * Without this a unit is "encircled" the instant it steps off ground it owns — and
+ * a front line by definition sits on ground neither side owns, so every attack bled
+ * out before it made contact. Measured before the band existed: combat accounted
+ * for 0.1% of unit-ticks while encirclement destroyed more HP than the armies
+ * managed to produce (ADR-024).
+ *
+ * Pockets are dilated in index order and the first to claim a cell keeps it, so the
+ * result does not depend on iteration accidents.
+ */
+function computeReach(world: World, pockets: Pocket[]): void {
+  const inf = world.influence;
+  const cells = inf.cw * inf.ch;
+  inf.reach.fill(0);
+  ensureQueue(cells);
+
+  for (const pocket of pockets) {
+    if (pocket.cities.length === 0) continue;
+    const plane = pocket.player * cells;
+    const mark = pocket.id + 1;
+    let head = 0;
+    let tail = 0;
+    for (let cell = 0; cell < cells; cell++) {
+      if (inf.pocketId[cell] !== pocket.id || inf.reach[plane + cell] !== 0) continue;
+      inf.reach[plane + cell] = mark;
+      queue[tail++] = cell;
+    }
+
+    // Breadth-first, one ring at a time, so `depth` is the true cell distance.
+    for (let depth = 0; depth < SUPPLY_REACH_CELLS && head < tail; depth++) {
+      const end = tail;
+      while (head < end) {
+        const cell = queue[head++]!;
+        const cx = cell % inf.cw;
+        const cy = (cell / inf.cw) | 0;
+        for (let d = 0; d < 4; d++) {
+          const nx = cx + (d === 0 ? 1 : d === 1 ? -1 : 0);
+          const ny = cy + (d === 2 ? 1 : d === 3 ? -1 : 0);
+          if (nx < 0 || ny < 0 || nx >= inf.cw || ny >= inf.ch) continue;
+          const ncell = ny * inf.cw + nx;
+          if (inf.reach[plane + ncell] !== 0) continue;
+          if (!Number.isFinite(world.map.coarseCost[ncell]!)) continue;
+          inf.reach[plane + ncell] = mark;
+          queue[tail++] = ncell;
+        }
+      }
+    }
+  }
+}
+
+/**
  * Assigns units to pockets. A unit standing inside one of its own cities is always
  * supplied, whatever the influence grid says — losing the garrison of a city you
  * still hold to a rounding artefact would be indefensible.
@@ -123,6 +175,7 @@ function markSupplied(world: World, pockets: Pocket[]): void {
 function attachUnits(world: World, pockets: Pocket[]): void {
   const inf = world.influence;
   const u = world.units;
+  const cells = inf.cw * inf.ch;
   for (let i = 0; i < u.capacity; i++) {
     if (!u.alive[i]) continue;
     const owner = u.owner[i]!;
@@ -132,6 +185,11 @@ function attachUnits(world: World, pockets: Pocket[]): void {
     if (inf.owner[cell] === owner) {
       const candidate = inf.pocketId[cell]!;
       if (candidate >= 0 && pockets[candidate]!.cities.length > 0) pid = candidate;
+    }
+    if (pid < 0) {
+      // Standing on ground it does not own, but still within reach of home supply.
+      const reached = inf.reach[owner * cells + cell]! - 1;
+      if (reached >= 0) pid = reached;
     }
     if (pid < 0) {
       const ci = cityAt(world.map, u.x[i]!, u.y[i]!);
@@ -160,6 +218,7 @@ export function computePockets(world: World): void {
   const pockets = labelComponents(world);
   attachCities(world, pockets);
   markSupplied(world, pockets);
+  computeReach(world, pockets);
   world.influence.pockets = pockets;
   refreshPocketUnits(world);
 }

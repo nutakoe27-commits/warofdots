@@ -89,6 +89,7 @@ function createInfluence(map: MapRuntime, playerCount: number): InfluenceState {
     pockets: [],
     lastTick: -1,
     field: new Float32Array(cells * (playerCount + 1)),
+    reach: new Int32Array(cells * (playerCount + 1)),
   };
 }
 

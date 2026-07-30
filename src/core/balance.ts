@@ -97,7 +97,16 @@ export const TERRAIN_DAMAGE: Table = table({
 /** 🎚 HP lost per second while standing in water — ships included. */
 export const WATER_DPS = 0.02;
 
-/** Pathfinding step cost per `[terrain][baseKind]` (light, heavy). Infinity blocks. */
+/**
+ * Pathfinding step cost per `[terrain][baseKind]` (light, heavy). Infinity blocks.
+ *
+ * Water is priced far above the ~3× that its speed penalty alone would suggest.
+ * At 8 per tile, A* found that swimming the thirteen-tile river on `crossing` beat
+ * walking to a bridge, so bots routed their armies into the water, converted to
+ * ships and dissolved — the two sides never once made contact in a twenty-minute
+ * match. The real cost of water is not slowness, it is arriving as a ship at half
+ * damage with HP already gone, and the number has to say so.
+ */
 export const PATH_COST: number[][] = [
   [1.0, 1.0], // plains
   [1.0, 2.4], // forest
@@ -105,7 +114,7 @@ export const PATH_COST: number[][] = [
   [1.5, 1.0], // sand
   [1.2, 1.2], // snow
   [1.5, 1.7], // mud
-  [8.0, 10.0], // water — legal but strongly discouraged
+  [30.0, 36.0], // water — legal, but only when there is genuinely no way round
   [Infinity, Infinity], // mountain
 ];
 
@@ -151,6 +160,13 @@ export const SUPPLY_PER_CITY = 5;
 export const STARVE_DPS = 0.03;
 /** 🎚 HP per second lost by units cut off from every friendly pocket. */
 export const ENCIRCLED_DPS = 0.08;
+/**
+ * 🎚 How far a pocket's supply reaches beyond the territory it owns, in coarse
+ * cells. A front line sits on ground neither side owns, so without a band like this
+ * every attack would be "encircled" the moment it left home and would bleed out
+ * before making contact (ADR-024). One cell is 16 world units.
+ */
+export const SUPPLY_REACH_CELLS = 2;
 /** Seconds of uncontested presence needed to flip a city. */
 export const CAPTURE_SEC = 4;
 /** Capture progress decays this many times faster than it builds when contested. */
