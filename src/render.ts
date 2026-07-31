@@ -41,6 +41,13 @@ const ARROW_HEAD = 11;
 const VISION_UNIT = 340;
 const VISION_CITY = 420;
 const FOG = 'rgba(8, 26, 12, 0.72)';
+/**
+ * The fog sheet is drawn at a quarter of the viewport and scaled back up. It is
+ * nothing but soft radial gradients, so the loss is invisible, while punching
+ * sixty-odd holes at full size cost more per frame than everything else together
+ * and halved the frame rate on its own.
+ */
+const FOG_SCALE = 4;
 
 /** Combat shake amplitude in world units. */
 const SHAKE = 2.4;
@@ -82,9 +89,9 @@ function drawTerrain(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera): 
 }
 
 function drawFog(ctx: CanvasRenderingContext2D, w: World, cam: Camera): void {
-  if (!fogBmp || fogBmp.width !== Math.ceil(cam.vw) || fogBmp.height !== Math.ceil(cam.vh)) {
-    fogBmp = canvasOf(Math.max(1, Math.ceil(cam.vw)), Math.max(1, Math.ceil(cam.vh)));
-  }
+  const fw = Math.max(1, Math.ceil(cam.vw / FOG_SCALE));
+  const fh = Math.max(1, Math.ceil(cam.vh / FOG_SCALE));
+  if (!fogBmp || fogBmp.width !== fw || fogBmp.height !== fh) fogBmp = canvasOf(fw, fh);
   const f = fogBmp.getContext('2d')!;
   f.setTransform(1, 0, 0, 1, 0, 0);
   f.clearRect(0, 0, fogBmp.width, fogBmp.height);
@@ -93,10 +100,10 @@ function drawFog(ctx: CanvasRenderingContext2D, w: World, cam: Camera): void {
   f.globalCompositeOperation = 'destination-out';
 
   const punch = (worldX: number, worldY: number, radius: number): void => {
-    const x = sx(cam, worldX);
-    const y = sy(cam, worldY);
-    const r = radius * cam.zoom;
-    if (x + r < 0 || y + r < 0 || x - r > cam.vw || y - r > cam.vh) return;
+    const x = sx(cam, worldX) / FOG_SCALE;
+    const y = sy(cam, worldY) / FOG_SCALE;
+    const r = (radius * cam.zoom) / FOG_SCALE;
+    if (x + r < 0 || y + r < 0 || x - r > fw || y - r > fh) return;
     const g = f.createRadialGradient(x, y, r * 0.55, x, y, r);
     g.addColorStop(0, 'rgba(0,0,0,1)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
@@ -112,7 +119,7 @@ function drawFog(ctx: CanvasRenderingContext2D, w: World, cam: Camera): void {
   }
 
   f.globalCompositeOperation = 'source-over';
-  ctx.drawImage(fogBmp, 0, 0);
+  ctx.drawImage(fogBmp, 0, 0, cam.vw, cam.vh);
 }
 
 function visible(w: World, x: number, y: number): boolean {

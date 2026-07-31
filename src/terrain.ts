@@ -195,8 +195,8 @@ export function createMap(seed = 4242): GameMap {
     blob(m, r, cx + range(r, -5, 5), cy + range(r, -5, 5), rad * 0.45, Terrain.Mountain);
   }
 
-  const river = meander(r, 190, -8, 206, h + 8, 34);
-  stampPath(m, river, 11, Terrain.Water);
+  const river = meander(r, 190, -8, 206, h + 8, 26);
+  stampPath(m, river, 8, Terrain.Water);
   const east = meander(r, 206, 110, w + 8, 88, 24);
   stampPath(m, east, 8, Terrain.Water);
   bridge(m, river, 0.2, 9);

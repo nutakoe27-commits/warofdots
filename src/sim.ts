@@ -45,7 +45,12 @@ const ENEMY_NEAR = 150;
 /** Standing this close to a friendly city doubles healing. */
 const CITY_RADIUS = 5 * TILE;
 
-const FRONT_EVERY = 8;
+/**
+ * Rebuild cadence for the border, in ticks. At 30 Hz this is six times a second;
+ * slower than that and the line visibly jumps along behind an advancing column
+ * instead of being carried by it.
+ */
+const FRONT_EVERY = 5;
 /** How close is close enough to a waypoint before walking to the next one. */
 const WAYPOINT_EPS = 16;
 

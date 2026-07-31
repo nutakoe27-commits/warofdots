@@ -1,6 +1,6 @@
 /** World state: map, units, selection, and the orders waiting to be confirmed. */
 
-import { createMap, TILE, Terrain, terrainAt } from './terrain.ts';
+import { createMap, TILE, Terrain, terrainAt, tileAt } from './terrain.ts';
 import type { GameMap } from './terrain.ts';
 import { makeRng, rand, range } from './rng.ts';
 import type { Rng } from './rng.ts';
@@ -90,6 +90,40 @@ export function openSpot(w: World, x: number, y: number, spread: number): { x: n
 
 const PER_SIDE = 64;
 
+/**
+ * The two banks of the river at this latitude, in tiles.
+ *
+ * Both armies line up on their own bank, close enough to be looking at each other.
+ * The border only ever sits where somebody is standing, so if the two sides start a
+ * third of the map apart the line starts a sixth of the map from either of them —
+ * which is exactly what it used to look like, and wrong.
+ */
+function banks(m: GameMap, ty: number): { west: number; east: number } {
+  let run = -1;
+  let bestStart = -1;
+  let bestEnd = -1;
+  let bestOff = Infinity;
+  for (let x = 140; x <= 270; x++) {
+    // Bridges count as part of the river, or the span either side of one reads as
+    // two separate rivers and the banks come out on the wrong sides.
+    const t = tileAt(m, x, ty);
+    const wet = t === Terrain.Water || t === Terrain.Bridge;
+    if (wet && run < 0) run = x;
+    if (run >= 0 && (!wet || x === 270)) {
+      const end = wet ? x : x - 1;
+      const off = Math.abs((run + end) / 2 - 200);
+      if (off < bestOff) {
+        bestOff = off;
+        bestStart = run;
+        bestEnd = end;
+      }
+      run = -1;
+    }
+  }
+  if (bestStart < 0) return { west: 196, east: 204 };
+  return { west: bestStart - 2, east: bestEnd + 2 };
+}
+
 export function createWorld(): World {
   const w: World = {
     map: createMap(),
@@ -103,15 +137,17 @@ export function createWorld(): World {
     casualties: [0, 0],
   };
 
-  // Both armies stand off either side of the river, so the opening frame already
-  // looks like a front rather than two blobs in opposite corners.
+  // Both armies stand along the river, each on its own bank, so the opening frame
+  // already looks like a front: a chain of troops with the line threaded past them.
   for (let i = 0; i < PER_SIDE; i++) {
     const t = i / (PER_SIDE - 1);
     const heavy = i % 4 === 1;
-    const laneY = (25 + t * 175) * TILE;
-    const b = openSpot(w, (150 + range(w.rng, -22, 22)) * TILE, laneY, 4 * TILE);
+    const ty = 24 + t * 177;
+    const { west, east } = banks(w.map, Math.round(ty));
+    const laneY = ty * TILE;
+    const b = openSpot(w, (west + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE);
     spawn(w, BLUE, b.x, b.y, heavy);
-    const r = openSpot(w, (250 + range(w.rng, -22, 22)) * TILE, laneY, 4 * TILE);
+    const r = openSpot(w, (east + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE);
     spawn(w, RED, r.x, r.y, heavy);
   }
   return w;
