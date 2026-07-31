@@ -1,9 +1,8 @@
 /**
  * The map: a tile grid plus the cities on it.
  *
- * Tiles are painted at one pixel each into an offscreen bitmap and blown up with
- * smoothing off, which is where the stair-stepped edges in the reference shots come
- * from. Keeping the grid coarse is the whole look.
+ * Tiles are painted one pixel each into an offscreen bitmap and blown up with
+ * smoothing off — that is where the stair-stepped edges of the original come from.
  */
 
 import { makeRng, rand, range } from './rng.ts';
@@ -16,6 +15,7 @@ export const Terrain = {
   Mountain: 3,
   Water: 4,
   Bridge: 5,
+  Sand: 6,
 } as const;
 export type TerrainId = (typeof Terrain)[keyof typeof Terrain];
 
@@ -26,15 +26,40 @@ export const TERRAIN_COLORS: readonly string[] = [
   '#7d7d7d', // mountain
   '#33a5f5', // water
   '#7b4a1e', // bridge
+  '#e8d48a', // sand
 ];
 
-/** Tile edge in world units. The world is `w * TILE` by `h * TILE`. */
-export const TILE = 8;
+/** Per-terrain movement multiplier for [light, heavy], straight from the in-game guide. */
+export const TERRAIN_SPEED: readonly (readonly [number, number])[] = [
+  [1, 1], // plains: normal
+  [1, 0.58], // forest: light normal, heavy slower
+  [1, 0.62], // hills: same
+  [0, 0], // mountain: impassable
+  [0.4, 0.34], // water: slows all
+  [1, 1], // bridge: acts like plains
+  [0.7, 1], // sand: slows light only
+];
+
+/** Per-terrain damage multiplier for [light, heavy]. */
+export const TERRAIN_DAMAGE: readonly (readonly [number, number])[] = [
+  [1, 1],
+  [1, 0.5], // forest: heavy weaker
+  [1, 0.55], // hills: heavy weaker
+  [0, 0],
+  [0.5, 0.5], // water: lowers damage
+  [1, 1],
+  [1, 1],
+];
+
+/** Tile edge in world units. */
+export const TILE = 10;
 
 export interface City {
   x: number;
   y: number;
   capital: boolean;
+  /** -1 neutral, 0 blue, 1 red. */
+  owner: number;
 }
 
 export interface GameMap {
@@ -46,31 +71,29 @@ export interface GameMap {
   worldH: number;
 }
 
-function set(map: GameMap, x: number, y: number, t: TerrainId): void {
-  if (x < 0 || y < 0 || x >= map.w || y >= map.h) return;
-  map.tiles[y * map.w + x] = t;
+function set(m: GameMap, x: number, y: number, t: TerrainId): void {
+  if (x < 0 || y < 0 || x >= m.w || y >= m.h) return;
+  m.tiles[y * m.w + x] = t;
 }
 
-export function tileAt(map: GameMap, tx: number, ty: number): number {
-  if (tx < 0 || ty < 0 || tx >= map.w || ty >= map.h) return Terrain.Mountain;
-  return map.tiles[ty * map.w + tx]!;
+export function tileAt(m: GameMap, tx: number, ty: number): number {
+  if (tx < 0 || ty < 0 || tx >= m.w || ty >= m.h) return Terrain.Mountain;
+  return m.tiles[ty * m.w + tx]!;
 }
 
-/** Terrain under a world-space point. */
-export function terrainAt(map: GameMap, x: number, y: number): number {
-  return tileAt(map, Math.floor(x / TILE), Math.floor(y / TILE));
+export function terrainAt(m: GameMap, x: number, y: number): number {
+  return tileAt(m, Math.floor(x / TILE), Math.floor(y / TILE));
 }
 
-export function isBlocked(t: number): boolean {
-  return t === Terrain.Mountain || t === Terrain.Water;
+export function passable(m: GameMap, x: number, y: number): boolean {
+  return terrainAt(m, x, y) !== Terrain.Mountain;
 }
 
-/** A circle whose radius wobbles with a few harmonics, so nothing looks stamped. */
-function blob(map: GameMap, r: Rng, cx: number, cy: number, radius: number, t: TerrainId): void {
+function blob(m: GameMap, r: Rng, cx: number, cy: number, radius: number, t: TerrainId): void {
   const p1 = rand(r) * Math.PI * 2;
   const p2 = rand(r) * Math.PI * 2;
-  const a1 = range(r, 0.12, 0.3);
-  const a2 = range(r, 0.06, 0.18);
+  const a1 = range(r, 0.14, 0.32);
+  const a2 = range(r, 0.07, 0.2);
   const max = radius * (1 + a1 + a2);
   for (let y = Math.floor(cy - max); y <= Math.ceil(cy + max); y++) {
     for (let x = Math.floor(cx - max); x <= Math.ceil(cx + max); x++) {
@@ -78,26 +101,23 @@ function blob(map: GameMap, r: Rng, cx: number, cy: number, radius: number, t: T
       const dy = y - cy;
       const d = Math.hypot(dx, dy);
       if (d > max) continue;
-      const ang = Math.atan2(dy, dx);
-      if (d <= radius * (1 + a1 * Math.sin(ang * 2 + p1) + a2 * Math.sin(ang * 3 + p2))) {
-        set(map, x, y, t);
-      }
+      const a = Math.atan2(dy, dx);
+      if (d <= radius * (1 + a1 * Math.sin(a * 2 + p1) + a2 * Math.sin(a * 3 + p2))) set(m, x, y, t);
     }
   }
 }
 
-function disc(map: GameMap, cx: number, cy: number, radius: number, t: TerrainId): void {
+function disc(m: GameMap, cx: number, cy: number, radius: number, t: TerrainId): void {
   for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++) {
     for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
-      if (Math.hypot(x - cx, y - cy) <= radius) set(map, x, y, t);
+      if (Math.hypot(x - cx, y - cy) <= radius) set(m, x, y, t);
     }
   }
 }
 
-/** Midpoint-displaced polyline, used for river courses. */
 function meander(r: Rng, ax: number, ay: number, bx: number, by: number, amp: number): number[] {
   let pts = [ax, ay, bx, by];
-  for (let pass = 0; pass < 5; pass++) {
+  for (let pass = 0; pass < 6; pass++) {
     const next: number[] = [pts[0]!, pts[1]!];
     const a = amp / (pass + 1);
     for (let i = 2; i < pts.length; i += 2) {
@@ -116,40 +136,34 @@ function meander(r: Rng, ax: number, ay: number, bx: number, by: number, amp: nu
   return pts;
 }
 
-function stampPath(map: GameMap, pts: number[], width: number, t: TerrainId): void {
+function stampPath(m: GameMap, pts: number[], width: number, t: TerrainId): void {
   for (let i = 2; i < pts.length; i += 2) {
     const x0 = pts[i - 2]!;
     const y0 = pts[i - 1]!;
-    const x1 = pts[i]!;
-    const y1 = pts[i + 1]!;
-    const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+    const steps = Math.max(1, Math.ceil(Math.hypot(pts[i]! - x0, pts[i + 1]! - y0)));
     for (let s = 0; s <= steps; s++) {
       const k = s / steps;
-      disc(map, x0 + (x1 - x0) * k, y0 + (y1 - y0) * k, width / 2, t);
+      disc(m, x0 + (pts[i]! - x0) * k, y0 + (pts[i + 1]! - y0) * k, width / 2, t);
     }
   }
 }
 
-/** Lays a bridge across the water at the point of `pts` nearest the sample index. */
-function bridgeAt(map: GameMap, pts: number[], index: number, span: number): void {
-  const i = Math.min(Math.max(index, 1), (pts.length >> 1) - 1) * 2;
+function bridge(m: GameMap, pts: number[], frac: number, span: number): void {
+  const i = Math.max(1, Math.min(Math.floor((pts.length >> 1) * frac), (pts.length >> 1) - 1)) * 2;
   const x = pts[i]!;
   const y = pts[i + 1]!;
-  const dx = pts[i]! - pts[i - 2]!;
+  const dx = x - pts[i - 2]!;
   const dy = pts[i + 1]! - pts[i - 1]!;
   const len = Math.hypot(dx, dy) || 1;
-  // Perpendicular to the river's course, so the deck always crosses it squarely.
-  const nx = -dy / len;
-  const ny = dx / len;
   for (let s = -span; s <= span; s += 0.5) {
-    disc(map, x + nx * s, y + ny * s, 1.6, Terrain.Bridge);
+    disc(m, x + (-dy / len) * s, y + (dx / len) * s, 2, Terrain.Bridge);
   }
 }
 
-export function createMap(seed = 20240823): GameMap {
-  const w = 240;
-  const h = 135;
-  const map: GameMap = {
+export function createMap(seed = 4242): GameMap {
+  const w = 400;
+  const h = 225;
+  const m: GameMap = {
     w,
     h,
     tiles: new Uint8Array(w * h).fill(Terrain.Plains),
@@ -160,50 +174,49 @@ export function createMap(seed = 20240823): GameMap {
   const r = makeRng(seed);
 
   for (const [cx, cy, rad] of [
-    [42, 104, 13],
-    [206, 30, 14],
-    [188, 112, 11],
-    [64, 24, 10],
+    [70, 40, 22],
+    [58, 176, 20],
+    [330, 52, 24],
+    [346, 180, 20],
+    [210, 26, 18],
+    [196, 200, 18],
   ] as const) {
-    blob(map, r, cx, cy, rad, Terrain.Forest);
+    blob(m, r, cx, cy, rad, Terrain.Forest);
   }
 
-  // Hills with darker cores, so ridges read as high ground rather than flat grey.
   for (const [cx, cy, rad] of [
-    [150, 34, 20],
-    [176, 60, 16],
-    [96, 96, 15],
-    [128, 118, 13],
+    [252, 60, 30],
+    [286, 108, 24],
+    [140, 150, 26],
+    [110, 96, 20],
+    [312, 156, 20],
   ] as const) {
-    blob(map, r, cx, cy, rad, Terrain.Hills);
-    blob(map, r, cx + range(r, -3, 3), cy + range(r, -3, 3), rad * 0.5, Terrain.Mountain);
+    blob(m, r, cx, cy, rad, Terrain.Hills);
+    blob(m, r, cx + range(r, -5, 5), cy + range(r, -5, 5), rad * 0.45, Terrain.Mountain);
   }
 
-  const main = meander(r, 118, -6, 126, h + 6, 26);
-  stampPath(map, main, 7, Terrain.Water);
-  const branch = meander(r, 126, 62, -6, 46, 18);
-  stampPath(map, branch, 5.5, Terrain.Water);
+  const river = meander(r, 190, -8, 206, h + 8, 34);
+  stampPath(m, river, 11, Terrain.Water);
+  const east = meander(r, 206, 110, w + 8, 88, 24);
+  stampPath(m, east, 8, Terrain.Water);
+  bridge(m, river, 0.2, 9);
+  bridge(m, river, 0.52, 9);
+  bridge(m, river, 0.82, 9);
+  bridge(m, east, 0.4, 8);
 
-  const mainPoints = main.length >> 1;
-  bridgeAt(map, main, Math.floor(mainPoints * 0.22), 7);
-  bridgeAt(map, main, Math.floor(mainPoints * 0.55), 7);
-  bridgeAt(map, main, Math.floor(mainPoints * 0.84), 7);
-  bridgeAt(map, branch, Math.floor((branch.length >> 1) * 0.45), 6);
-
-  map.cities = [
-    { x: 22, y: 68, capital: true },
-    { x: 218, y: 68, capital: true },
-    { x: 70, y: 40, capital: false },
-    { x: 62, y: 100, capital: false },
-    { x: 104, y: 20, capital: false },
-    { x: 100, y: 112, capital: false },
-    { x: 152, y: 96, capital: false },
-    { x: 160, y: 18, capital: false },
-    { x: 196, y: 84, capital: false },
-    { x: 186, y: 46, capital: false },
+  m.cities = [
+    { x: 30, y: 112, capital: true, owner: 0 },
+    { x: 372, y: 112, capital: true, owner: 1 },
+    { x: 92, y: 56, capital: false, owner: 0 },
+    { x: 88, y: 168, capital: false, owner: 0 },
+    { x: 150, y: 108, capital: false, owner: 0 },
+    { x: 306, y: 60, capital: false, owner: 1 },
+    { x: 310, y: 170, capital: false, owner: 1 },
+    { x: 250, y: 112, capital: false, owner: 1 },
+    { x: 198, y: 40, capital: false, owner: -1 },
+    { x: 200, y: 186, capital: false, owner: -1 },
   ];
-  // A city sitting in a river or on a cliff would be unreachable, so clear its ground.
-  for (const c of map.cities) disc(map, c.x, c.y, 3, Terrain.Plains);
+  for (const c of m.cities) disc(m, c.x, c.y, 4, Terrain.Plains);
 
-  return map;
+  return m;
 }

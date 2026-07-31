@@ -1,133 +1,179 @@
 /**
- * The simulation: pick a target, walk toward it, fight whatever you bump into.
+ * Movement, combat, morale and healing.
  *
- * Deliberately small. Units head for the nearest enemy and push each other apart,
- * and that alone is enough to make the two armies settle into a line — which is the
- * thing the front-line contour is drawn from.
+ * The rule that shapes everything: combat happens automatically on contact, and
+ * whichever unit is *advancing* counts as the attacker. It deals more damage but
+ * takes more and burns morale faster, which is why the guide says to avoid
+ * attacking constantly — standing your ground is a real choice.
  */
 
-import { Terrain, terrainAt, TILE } from './terrain.ts';
+import { Terrain, TERRAIN_DAMAGE, TERRAIN_SPEED, TILE, passable, terrainAt } from './terrain.ts';
 import { computeFront } from './frontline.ts';
-import { BLUE, RED, findOpenSpot, reinforce } from './world.ts';
+import { BLUE, RED } from './world.ts';
 import type { Unit, World } from './world.ts';
-import { rand } from './rng.ts';
 
 export const TICK = 1 / 30;
 
-/** World units per second on open ground. */
-const SPEED_LIGHT = 26;
-const SPEED_HEAVY = 17;
-const CONTACT = 17;
-const SEPARATION = 15;
-const DAMAGE_LIGHT = 0.13;
-const DAMAGE_HEAVY = 0.24;
-/** Terrain speed multiplier, indexed by TerrainId. */
-const TERRAIN_SPEED = [1, 0.62, 0.72, 0, 0, 1.1];
-/** Rebuild the contour a few times a second; it does not need to be per-frame. */
-const FRONT_EVERY = 6;
-const REINFORCE_EVERY = 11;
-const REINFORCE_COUNT = 5;
+/** World units per second. */
+const SPEED = [78, 52];
+/** Contact radius, world units. */
+const RADIUS = [9, 10.5];
+/** Units closer than this shove each other apart. */
+const SEPARATION = 17;
+/** Separation strength as a fraction of walking speed. */
+const SEPARATION_FORCE = 0.75;
+/** Base damage per second at full health and morale. */
+const DAMAGE = [0.115, 0.2];
 
-function speedOf(w: World, u: Unit): number {
-  const base = u.heavy ? SPEED_HEAVY : SPEED_LIGHT;
-  const t = terrainAt(w.map, u.x, u.y);
-  return base * (TERRAIN_SPEED[t] ?? 1);
+const ATTACK_DAMAGE = 1.5;
+const ATTACK_TAKEN = 1.35;
+const ATTACK_MORALE_DRAIN = 0.11;
+const DEFEND_MORALE_DRAIN = 0.045;
+/** Even at zero morale a unit still fights this hard. */
+const MORALE_FLOOR = 0.25;
+/** How hard an attacker shoves the defender back, world units per second. */
+const PUSH = 16;
+/** Speed below which a unit counts as holding rather than advancing. */
+const ADVANCING_SPEED = 8;
+
+const HEAL_FAR = 0.05;
+const HEAL_NEAR = 0.012;
+const CITY_HEAL_MULT = 2;
+const MORALE_REGEN = 0.09;
+/** An enemy within this many world units slows healing right down. */
+const ENEMY_NEAR = 150;
+/** Standing this close to a friendly city doubles healing. */
+const CITY_RADIUS = 5 * TILE;
+
+const FRONT_EVERY = 8;
+/** How close is close enough to a waypoint before walking to the next one. */
+const WAYPOINT_EPS = 16;
+
+function kindIndex(u: Unit): number {
+  return u.heavy ? 1 : 0;
 }
 
-/** Nearest living enemy, or null. */
-function nearestEnemy(w: World, u: Unit): Unit | null {
-  let best: Unit | null = null;
-  let bestD = Infinity;
-  for (const o of w.units) {
-    if (!o.alive || o.side === u.side) continue;
-    const d = (o.x - u.x) ** 2 + (o.y - u.y) ** 2;
-    if (d < bestD) {
-      bestD = d;
-      best = o;
-    }
-  }
-  return best;
+function speedOf(w: World, u: Unit): number {
+  const t = terrainAt(w.map, u.x, u.y);
+  return SPEED[kindIndex(u)]! * (TERRAIN_SPEED[t]?.[kindIndex(u)] ?? 1);
+}
+
+function damageOf(w: World, u: Unit): number {
+  const t = terrainAt(w.map, u.x, u.y);
+  const terrain = TERRAIN_DAMAGE[t]?.[kindIndex(u)] ?? 1;
+  const health = Math.sqrt(Math.max(0, u.hp));
+  const morale = MORALE_FLOOR + (1 - MORALE_FLOOR) * Math.max(0, u.morale);
+  return DAMAGE[kindIndex(u)]! * health * morale * terrain;
 }
 
 /**
- * Beyond this a unit ignores the enemy it can see and just advances.
+ * Point on the unit's route it is walking toward, offset sideways so a group
+ * ordered along one drawn route walks abreast instead of in single file.
  *
- * Without it every unit walks at whichever single enemy happens to be nearest, the
- * whole army converges on one point, and instead of a front you get a knot. Holding
- * your own lane until the enemy is genuinely close is what spreads the two sides
- * into facing lines.
+ * The offset direction comes from the route's own geometry and never from the
+ * unit's position. Deriving it from the unit made the target move as the unit
+ * moved, and any unit whose offset pointed backwards chased it in a circle
+ * forever — three of six never left the first waypoint.
  */
-const ENGAGE_RANGE = 190;
+function waypoint(u: Unit): { x: number; y: number } | null {
+  const p = u.path;
+  if (!p || u.leg * 2 + 1 >= p.length) return null;
+  const i = u.leg * 2;
+  const tx = p[i]!;
+  const ty = p[i + 1]!;
+  if (u.lateral === 0 || p.length < 4) return { x: tx, y: ty };
 
-function retarget(w: World, u: Unit): void {
-  const enemy = nearestEnemy(w, u);
-  if (enemy && Math.hypot(enemy.x - u.x, enemy.y - u.y) < ENGAGE_RANGE) {
-    u.tx = enemy.x;
-    u.ty = enemy.y;
-    return;
-  }
-  // Otherwise push straight across at the enemy's half, keeping this unit's own
-  // latitude, so the army advances as a broad line rather than a column.
-  const capital = w.map.cities[u.side === BLUE ? 1 : 0]!;
-  u.tx = capital.x * TILE;
-  u.ty = u.y + (capital.y * TILE - u.y) * 0.12;
+  const ax = u.leg > 0 ? p[i - 2]! : tx;
+  const ay = u.leg > 0 ? p[i - 1]! : ty;
+  const bx = u.leg > 0 ? tx : p[2]!;
+  const by = u.leg > 0 ? ty : p[3]!;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: tx + (-dy / len) * u.lateral, y: ty + (dx / len) * u.lateral };
 }
 
-/** Steps the unit, sliding along water and cliffs instead of walking into them. */
-function move(w: World, u: Unit, dt: number): void {
-  const dx = u.tx - u.x;
-  const dy = u.ty - u.y;
-  const dist = Math.hypot(dx, dy);
-  const speed = speedOf(w, u);
+/** True once the unit is level with the waypoint, even if it passed wide of it. */
+function passedWaypoint(u: Unit, target: { x: number; y: number }): boolean {
+  const p = u.path;
+  if (!p || p.length < 4) return false;
+  const i = u.leg * 2;
+  const ax = u.leg > 0 ? p[i - 2]! : p[0]!;
+  const ay = u.leg > 0 ? p[i - 1]! : p[1]!;
+  const dx = p[i]! - ax;
+  const dy = p[i + 1]! - ay;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-4) return true;
+  return ((u.x - target.x) * dx + (u.y - target.y) * dy) / len > 0;
+}
 
+function advance(w: World, u: Unit, dt: number): void {
+  const target = waypoint(u);
   let ax = 0;
   let ay = 0;
-  if (dist > CONTACT * 0.8 && speed > 0) {
-    ax = (dx / dist) * speed;
-    ay = (dy / dist) * speed;
+  const speed = speedOf(w, u);
+
+  if (target && speed > 0) {
+    const dx = target.x - u.x;
+    const dy = target.y - u.y;
+    const d = Math.hypot(dx, dy);
+    if (d < WAYPOINT_EPS || passedWaypoint(u, target)) {
+      u.leg++;
+      if (u.leg * 2 + 1 >= (u.path?.length ?? 0)) {
+        u.path = null;
+        u.leg = 0;
+        u.lateral = 0;
+      }
+    } else {
+      ax = (dx / d) * speed;
+      ay = (dy / d) * speed;
+    }
   }
 
-  // Separation: keeps the mass from collapsing into a single dot and is what
-  // spreads a crowd out into a line along the contact edge.
-  let sx = 0;
-  let sy = 0;
+  let sxv = 0;
+  let syv = 0;
   for (const o of w.units) {
     if (o === u || !o.alive) continue;
-    const ox = u.x - o.x;
-    const oy = u.y - o.y;
-    const d = Math.hypot(ox, oy);
+    const dx = u.x - o.x;
+    const dy = u.y - o.y;
+    const d = Math.hypot(dx, dy);
     if (d > SEPARATION || d < 1e-4) continue;
-    const push = (1 - d / SEPARATION) / d;
-    sx += ox * push;
-    sy += oy * push;
+    const k = (1 - d / SEPARATION) / d;
+    sxv += dx * k;
+    syv += dy * k;
+  }
+  // Clamped, and scaled against walking speed. Unclamped it reached several
+  // hundred world units per second in a crowd, drowning the movement it was
+  // supposed to tidy up: the group sat still and vibrated instead of advancing.
+  const push = Math.hypot(sxv, syv);
+  if (push > 1e-4) {
+    const scale = (Math.min(push, 1) / push) * speed * SEPARATION_FORCE;
+    sxv *= scale;
+    syv *= scale;
   }
 
-  u.vx += (ax + sx * speed * 2.2 - u.vx) * 0.25;
-  u.vy += (ay + sy * speed * 2.2 - u.vy) * 0.25;
+  u.vx += (ax + sxv - u.vx) * 0.3;
+  u.vy += (ay + syv - u.vy) * 0.3;
 
   const nx = u.x + u.vx * dt;
   const ny = u.y + u.vy * dt;
-  const blockedX = passable(w, nx, u.y);
-  const blockedY = passable(w, u.x, ny);
-  if (passable(w, nx, ny)) {
+  if (passable(w.map, nx, ny)) {
     u.x = nx;
     u.y = ny;
-  } else if (blockedX) {
+  } else if (passable(w.map, nx, u.y)) {
     u.x = nx;
-  } else if (blockedY) {
+  } else if (passable(w.map, u.x, ny)) {
     u.y = ny;
   }
-  u.x = Math.min(Math.max(u.x, 4), w.map.worldW - 4);
-  u.y = Math.min(Math.max(u.y, 4), w.map.worldH - 4);
+  u.x = Math.min(Math.max(u.x, 8), w.map.worldW - 8);
+  u.y = Math.min(Math.max(u.y, 8), w.map.worldH - 8);
 }
 
-function passable(w: World, x: number, y: number): boolean {
-  const t = terrainAt(w.map, x, y);
-  return t !== Terrain.Mountain && t !== Terrain.Water;
-}
-
-function fight(w: World, dt: number): void {
-  for (const u of w.units) u.inCombat = false;
+function resolveCombat(w: World, dt: number): void {
+  for (const u of w.units) {
+    u.inCombat = false;
+    u.attacking = false;
+  }
 
   for (let i = 0; i < w.units.length; i++) {
     const a = w.units[i]!;
@@ -135,64 +181,103 @@ function fight(w: World, dt: number): void {
     for (let j = i + 1; j < w.units.length; j++) {
       const b = w.units[j]!;
       if (!b.alive || b.side === a.side) continue;
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (d > CONTACT) continue;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d = Math.hypot(dx, dy);
+      if (d > RADIUS[kindIndex(a)]! + RADIUS[kindIndex(b)]!) continue;
+
       a.inCombat = true;
       b.inCombat = true;
-      b.hp -= (a.heavy ? DAMAGE_HEAVY : DAMAGE_LIGHT) * dt;
-      a.hp -= (b.heavy ? DAMAGE_HEAVY : DAMAGE_LIGHT) * dt;
+      // The one still pushing forward is the attacker.
+      const aMoving = Math.hypot(a.vx, a.vy) > ADVANCING_SPEED && a.path !== null;
+      const bMoving = Math.hypot(b.vx, b.vy) > ADVANCING_SPEED && b.path !== null;
+      a.attacking = aMoving;
+      b.attacking = bMoving;
+
+      const aOut = damageOf(w, a) * (aMoving ? ATTACK_DAMAGE : 1) * (bMoving ? ATTACK_TAKEN : 1);
+      const bOut = damageOf(w, b) * (bMoving ? ATTACK_DAMAGE : 1) * (aMoving ? ATTACK_TAKEN : 1);
+      b.hp -= aOut * dt;
+      a.hp -= bOut * dt;
+
+      if (d > 1e-4) {
+        const ux = dx / d;
+        const uy = dy / d;
+        // Attacking pushes the enemy back.
+        if (aMoving && !bMoving) {
+          b.x += ux * PUSH * dt;
+          b.y += uy * PUSH * dt;
+        } else if (bMoving && !aMoving) {
+          a.x -= ux * PUSH * dt;
+          a.y -= uy * PUSH * dt;
+        }
+      }
     }
   }
 
   for (const u of w.units) {
-    if (u.alive && u.hp <= 0) {
+    if (!u.alive) continue;
+    if (u.inCombat) {
+      u.morale -= (u.attacking ? ATTACK_MORALE_DRAIN : DEFEND_MORALE_DRAIN) * dt;
+      u.morale = Math.max(0, u.morale);
+    }
+    if (u.hp <= 0) {
       u.alive = false;
       u.hp = 0;
+      w.casualties[u.side]!++;
     }
+  }
+}
+
+function nearestEnemyDistance(w: World, u: Unit): number {
+  let best = Infinity;
+  for (const o of w.units) {
+    if (!o.alive || o.side === u.side) continue;
+    const d = Math.hypot(o.x - u.x, o.y - u.y);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function onFriendlyCity(w: World, u: Unit): boolean {
+  for (const c of w.map.cities) {
+    if (c.owner !== u.side) continue;
+    if (Math.hypot(u.x - c.x * TILE, u.y - c.y * TILE) < CITY_RADIUS) return true;
+  }
+  return false;
+}
+
+function recover(w: World, dt: number): void {
+  for (const u of w.units) {
+    if (!u.alive || u.inCombat) continue;
+    u.morale = Math.min(1, u.morale + MORALE_REGEN * dt);
+    if (u.hp >= 1) continue;
+    // Healing is faster away from the enemy, and doubles on your own city.
+    const far = nearestEnemyDistance(w, u) > ENEMY_NEAR;
+    const rate = (far ? HEAL_FAR : HEAL_NEAR) * (onFriendlyCity(w, u) ? CITY_HEAL_MULT : 1);
+    u.hp = Math.min(1, u.hp + rate * dt);
   }
 }
 
 export function step(w: World): void {
   w.tick++;
-  const dt = TICK;
+  w.time += TICK;
 
   for (const u of w.units) {
-    if (!u.alive) continue;
-    // Re-aiming every unit every tick is wasted work and makes them jitter, so
-    // each one re-checks roughly twice a second on its own offset.
-    if ((w.tick + (u.heavy ? 7 : 0)) % 15 === 0 || u.tx === u.x) retarget(w, u);
-    move(w, u, dt);
+    if (u.alive) advance(w, u, TICK);
   }
+  resolveCombat(w, TICK);
+  recover(w, TICK);
 
-  fight(w, dt);
-
-  for (const side of [BLUE, RED]) {
-    w.reinforce[side] -= dt;
-    if (w.reinforce[side]! <= 0) {
-      w.reinforce[side] = REINFORCE_EVERY;
-      reinforce(w, side, REINFORCE_COUNT);
-    }
-  }
-
-  // Bodies are dropped once in a while rather than every tick, to keep the array
-  // stable while the render loop is walking it.
-  if (w.tick % 60 === 0) {
-    w.units = w.units.filter((u) => u.alive);
-    if (w.units.length > 400) w.units.length = 400;
-  }
-
+  if (w.tick % 90 === 0) w.units = w.units.filter((u) => u.alive);
   if (w.tick % FRONT_EVERY === 0) {
-    w.front = computeFront(w.units, w.map.worldW, w.map.worldH);
+    w.front = computeFront(w.units, w.map.cities, w.map.worldW, w.map.worldH);
   }
 }
 
-/** Scatters a few units at the start so the opening does not look like a parade. */
-export function jostle(w: World): void {
-  for (const u of w.units) {
-    const spot = findOpenSpot(w, u.x, u.y, 6);
-    u.x = spot.x;
-    u.y = spot.y;
-    u.vx = rand(w.rng) * 2 - 1;
-    u.vy = rand(w.rng) * 2 - 1;
-  }
+export function troopCount(w: World, side: number): number {
+  let n = 0;
+  for (const u of w.units) if (u.alive && u.side === side) n++;
+  return n;
 }
+
+export { BLUE, RED, Terrain };
