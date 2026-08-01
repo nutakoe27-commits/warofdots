@@ -92,12 +92,21 @@ function stamp(cover: Float32Array, s: Source, cw: number, ch: number): void {
   }
 }
 
-/** First call only: every cell goes to the side standing nearest it. */
+/**
+ * First call only: every cell goes to the side standing nearest it.
+ *
+ * Sampled every fourth cell in each direction and filled in blocks. At full
+ * resolution this is every cell against every unit, which took 50ms — the single
+ * worst stall in the game, right at load. It only has to be roughly right: the
+ * capture pass repaints everything near the troops on the same frame, and out in
+ * the empty country the answer barely changes over four cells anyway.
+ */
+const SEED_STEP = 4;
+
 function seed(cw: number, ch: number): void {
-  for (let y = 0; y < GH; y++) {
+  for (let y = 0; y < GH; y += SEED_STEP) {
     const py = (y + 0.5) * ch;
-    const row = y * GW;
-    for (let x = 0; x < GW; x++) {
+    for (let x = 0; x < GW; x += SEED_STEP) {
       const px = (x + 0.5) * cw;
       let db = Infinity;
       let dr = Infinity;
@@ -115,7 +124,10 @@ function seed(cw: number, ch: number): void {
         const d = dx * dx + dy * dy;
         if (d < dr) dr = d;
       }
-      owner[row + x] = db <= dr ? 0 : 1;
+      const side = db <= dr ? 0 : 1;
+      const yEnd = Math.min(y + SEED_STEP, GH);
+      const xEnd = Math.min(x + SEED_STEP, GW);
+      for (let by = y; by < yEnd; by++) owner.fill(side, by * GW + x, by * GW + xEnd);
     }
   }
 }

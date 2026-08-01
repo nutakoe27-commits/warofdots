@@ -1,16 +1,16 @@
 /**
  * Mouse and keyboard.
  *
- * Orders are drawn first and committed with ENTER, exactly as the original does.
- * That is why a drag leaves a grey arrow behind instead of the units setting off:
- * you lay out the whole move, look at it, and then confirm.
+ * Orders run the instant they are given. Select, drag a route, let go, and the
+ * troops are already walking it — there is nothing to confirm.
  */
 
 import { clamp, pan, sx, sy, wx, wy, zoomAt } from './camera.ts';
 import type { Camera } from './camera.ts';
+import { clearLine, findPath } from './nav.ts';
 import { TILE } from './terrain.ts';
 import { BLUE, selectedUnits } from './world.ts';
-import type { PendingOrder, Unit, World } from './world.ts';
+import type { Unit, World } from './world.ts';
 
 const ZOOM_STEP = 1.14;
 /** A drag shorter than this counts as a click. */
@@ -85,10 +85,43 @@ function pickUnit(w: World, cam: Camera, px: number, py: number): Unit | null {
   return best;
 }
 
-/** Lays a pending order on every selected unit, spread across the route's width. */
+/**
+ * Searches allowed while handing out a single order.
+ *
+ * Sending a whole army across broken country wanted sixty-odd routes at once and
+ * cost 42ms — a dropped frame the instant you let go of the mouse. The ones that
+ * miss out set off straight at the target and ask for a route when they actually
+ * meet something, which is the same machinery half a second later and invisible.
+ */
+const ORDER_SEARCHES = 8;
+let searchBudget = 0;
+
+/**
+ * The route a unit should actually walk to reach a point: the straight line when
+ * nothing is in the way, and a way round when something is.
+ */
+function routeTo(w: World, u: Unit, x: number, y: number): number[] {
+  if (clearLine(w.map, u.x, u.y, x, y) || searchBudget === 0) return [x, y];
+  searchBudget--;
+  const found = findPath(w.map, u.x, u.y, x, y);
+  // findPath starts at the unit itself; that first point is where it already is.
+  return found && found.length > 2 ? found.slice(2) : [x, y];
+}
+
+function send(u: Unit, path: number[], lateral: number): void {
+  // An empty route has to become null, not an empty array: `path !== null` is what
+  // marks a unit as advancing, and a stationary one must never read as attacking.
+  u.path = path.length >= 2 ? path : null;
+  u.leg = 0;
+  u.lateral = lateral;
+  u.stuck = 0;
+}
+
+/** Sends every selected unit along the drawn route, spread across its width. */
 function orderAlongRoute(w: World, route: number[]): void {
   const units = selectedUnits(w);
   if (units.length === 0 || route.length < 4) return;
+  searchBudget = ORDER_SEARCHES;
 
   const dirX = route[2]! - route[0]!;
   const dirY = route[3]! - route[1]!;
@@ -101,11 +134,11 @@ function orderAlongRoute(w: World, route: number[]): void {
   const files = Math.max(1, Math.min(ordered.length, MAX_FILES));
   const centre = (files - 1) / 2;
   ordered.forEach((u, i) => {
-    w.pending.set(u.id, {
-      unitId: u.id,
-      path: route.slice(),
-      lateral: ((i % files) - centre) * FILE_SPACING,
-    });
+    // Getting to the head of the drawn route is the unit's own problem, and it may
+    // have a hill in the way; the drawn part after that is exactly as drawn.
+    const lead = routeTo(w, u, route[0]!, route[1]!);
+    lead.length -= 2;
+    send(u, [...lead, ...route], ((i % files) - centre) * FILE_SPACING);
   });
 }
 
@@ -113,11 +146,10 @@ function orderAlongRoute(w: World, route: number[]): void {
 function orderFormation(w: World, fromX: number, fromY: number, toX: number, toY: number): void {
   const units = selectedUnits(w);
   if (units.length === 0) return;
+  searchBudget = ORDER_SEARCHES;
   const dx = toX - fromX;
   const dy = toY - fromY;
-  for (const u of units) {
-    w.pending.set(u.id, { unitId: u.id, path: [u.x + dx, u.y + dy], lateral: 0 });
-  }
+  for (const u of units) send(u, routeTo(w, u, u.x + dx, u.y + dy), 0);
 }
 
 function orderToPoint(w: World, x: number, y: number): void {
@@ -130,33 +162,15 @@ function orderToPoint(w: World, x: number, y: number): void {
   void centreY;
 }
 
-/** Moves every pending order onto its unit. This is what ENTER does. */
-export function confirmOrders(w: World): void {
-  for (const order of w.pending.values()) {
-    const u = w.units.find((x) => x.id === order.unitId && x.alive);
-    if (!u) continue;
-    u.path = order.path.slice();
-    u.leg = 0;
-    u.lateral = order.lateral;
-  }
-  w.pending.clear();
-}
-
+/** Cancels the route: the unit keeps walking off its momentum and then holds. */
 export function clearOrders(w: World): void {
-  w.pending.clear();
-  for (const u of selectedUnits(w)) {
-    u.path = null;
-    u.leg = 0;
-    u.lateral = 0;
-  }
+  for (const u of selectedUnits(w)) send(u, [], 0);
 }
 
+/** Same, but plants it where it stands. */
 export function stopSelected(w: World): void {
-  w.pending.clear();
   for (const u of selectedUnits(w)) {
-    u.path = null;
-    u.leg = 0;
-    u.lateral = 0;
+    send(u, [], 0);
     u.vx = 0;
     u.vy = 0;
   }
@@ -306,4 +320,3 @@ export function updateCamera(deps: InputDeps, keys: Set<string>, dt: number): vo
 }
 
 export { TILE };
-export type { PendingOrder };

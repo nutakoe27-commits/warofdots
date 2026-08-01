@@ -4,7 +4,7 @@ import './style.css';
 import { createWorld, pruneSelection, BLUE, RED } from './world.ts';
 import { step, TICK, troopCount } from './sim.ts';
 import { createCamera, clamp } from './camera.ts';
-import { attachInput, clearOrders, confirmOrders, createInput, stopSelected, updateCamera } from './input.ts';
+import { attachInput, clearOrders, createInput, stopSelected, updateCamera } from './input.ts';
 import { render } from './render.ts';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement | null;
@@ -37,8 +37,7 @@ attachInput(canvas, { world, camera, input });
 window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   keys.add(k);
-  if (e.key === 'Enter') confirmOrders(world);
-  else if (k === 'c') clearOrders(world);
+  if (k === 'c') clearOrders(world);
   else if (k === 's' && !keys.has('shift')) stopSelected(world);
   else if (k === 'f') fogOn = !fogOn;
   else if (k === 'escape') world.selection.clear();
@@ -66,9 +65,7 @@ function updateHud(): void {
     `<div class="losses"><b>Потери</b>` +
     `<span class="blue">${world.casualties[BLUE]}</span>` +
     `<span class="red">${world.casualties[RED]}</span></div>` +
-    `<div class="sel">Выделено: ${world.selection.size}` +
-    (world.pending.size ? ` · приказов к подтверждению: ${world.pending.size} <b>[Enter]</b>` : '') +
-    `</div>`;
+    `<div class="sel">Выделено: ${world.selection.size}</div>`;
 }
 
 let last = performance.now();

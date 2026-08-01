@@ -210,62 +210,30 @@ function arrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number
   ctx.lineTo(x1 - ux * ARROW_HEAD + uy * ARROW_HEAD * 0.55, y1 - uy * ARROW_HEAD - ux * ARROW_HEAD * 0.55);
 }
 
-/** Where a unit actually ends up: the route's last vertex, plus its own offset. */
-function endPoint(path: number[], lateral: number): { x: number; y: number } {
-  const n = path.length;
-  const x = path[n - 2]!;
-  const y = path[n - 1]!;
-  if (n < 4 || lateral === 0) return { x, y };
-  const dx = x - path[n - 4]!;
-  const dy = y - path[n - 3]!;
-  const len = Math.hypot(dx, dy) || 1;
-  return { x: x + (-dy / len) * lateral, y: y + (dx / len) * lateral };
-}
-
 function drawOrders(ctx: CanvasRenderingContext2D, w: World, cam: Camera, input: InputState): void {
-  // Confirmed routes, faint.
+  // Where everyone is actually going, with a head on the end so the direction
+  // reads at a glance. Orders run the moment they are given, so this is a live
+  // picture of the army rather than a plan waiting on a key.
   ctx.strokeStyle = ACTIVE_PATH;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   for (const u of w.units) {
     if (!u.alive || u.side !== BLUE || !u.path) continue;
-    ctx.moveTo(sx(cam, u.x), sy(cam, u.y));
+    let toX = sx(cam, u.x);
+    let toY = sy(cam, u.y);
+    let fromX = toX;
+    let fromY = toY;
+    ctx.moveTo(toX, toY);
     for (let i = u.leg * 2; i + 1 < u.path.length; i += 2) {
-      ctx.lineTo(sx(cam, u.path[i]!), sy(cam, u.path[i + 1]!));
+      fromX = toX;
+      fromY = toY;
+      toX = sx(cam, u.path[i]!);
+      toY = sy(cam, u.path[i + 1]!);
+      ctx.lineTo(toX, toY);
     }
+    arrow(ctx, fromX, fromY, toX, toY);
   }
   ctx.stroke();
-
-  // Pending orders waiting on ENTER.
-  //
-  // Each unit gets one arrow to *its own* end point, and the shared route is drawn
-  // once on top. Drawing every unit's full path made twenty lines converge on the
-  // spot the drag started, which read as a starburst and told you nothing.
-  const orders = [...w.pending.values()];
-  if (orders.length > 0) {
-    ctx.strokeStyle = PENDING;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (const order of orders) {
-      const u = w.units.find((x) => x.id === order.unitId && x.alive);
-      if (!u) continue;
-      const end = endPoint(order.path, order.lateral);
-      arrow(ctx, sx(cam, u.x), sy(cam, u.y), sx(cam, end.x), sy(cam, end.y));
-    }
-    ctx.stroke();
-
-    const route = orders[0]!.path;
-    if (route.length >= 4) {
-      ctx.strokeStyle = PENDING;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(sx(cam, route[0]!), sy(cam, route[1]!));
-      for (let i = 2; i + 1 < route.length; i += 2) {
-        ctx.lineTo(sx(cam, route[i]!), sy(cam, route[i + 1]!));
-      }
-      ctx.stroke();
-    }
-  }
 
   // The route being drawn right now.
   if (input.route.length >= 4) {

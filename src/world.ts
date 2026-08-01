@@ -30,13 +30,8 @@ export interface Unit {
   inCombat: boolean;
   /** Set while the unit is the one advancing — it hits harder and takes more. */
   attacking: boolean;
-}
-
-/** An order that has been drawn but not yet confirmed with Enter. */
-export interface PendingOrder {
-  unitId: number;
-  path: number[];
-  lateral: number;
+  /** Ticks spent going nowhere. Past a threshold the unit asks for a way round. */
+  stuck: number;
 }
 
 export interface World {
@@ -48,7 +43,6 @@ export interface World {
   time: number;
   /** Selected unit ids (player side only). */
   selection: Set<number>;
-  pending: Map<number, PendingOrder>;
   casualties: [number, number];
 }
 
@@ -71,6 +65,7 @@ function spawn(w: World, side: number, x: number, y: number, heavy: boolean): Un
     lateral: 0,
     inCombat: false,
     attacking: false,
+    stuck: 0,
   };
   w.units.push(u);
   return u;
@@ -156,7 +151,6 @@ export function createWorld(): World {
     tick: 0,
     time: 0,
     selection: new Set(),
-    pending: new Map(),
     casualties: [0, 0],
   };
 
@@ -193,10 +187,7 @@ export function selectedUnits(w: World): Unit[] {
 export function pruneSelection(w: World): void {
   for (const id of [...w.selection]) {
     const u = unitById(w, id);
-    if (!u || u.side !== BLUE) {
-      w.selection.delete(id);
-      w.pending.delete(id);
-    }
+    if (!u || u.side !== BLUE) w.selection.delete(id);
   }
 }
 

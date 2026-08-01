@@ -17,6 +17,7 @@
 
 import { Terrain, TERRAIN_DAMAGE, TERRAIN_SPEED, TILE, passable, terrainAt } from './terrain.ts';
 import { computeFront } from './frontline.ts';
+import { clearLine, findPath } from './nav.ts';
 import { BLUE, RED } from './world.ts';
 import type { Unit, World } from './world.ts';
 
@@ -83,6 +84,20 @@ const CAPTURE_EVERY = 15;
 const FRONT_EVERY = 5;
 /** How close is close enough to a waypoint before walking to the next one. */
 const WAYPOINT_EPS = 16;
+
+/**
+ * Going nowhere for this long means the way ahead is not going to open by itself.
+ *
+ * Sliding along whatever you bump into gets a unit round the side of a hill and
+ * leaves it pressed into a dead end forever. Rather than try to be clever about
+ * which is which, a unit that has stopped making ground simply asks for a real
+ * route. Costs nothing until it happens, and only then to the unit it happens to.
+ */
+const STUCK_TICKS = 12;
+/** Fraction of its walking pace below which a unit counts as going nowhere. */
+const STUCK_PACE = 0.3;
+/** Searches allowed per tick, so a whole army jammed at once cannot stall a frame. */
+const REPATH_BUDGET = 3;
 
 function kindIndex(u: Unit): number {
   return u.heavy ? 1 : 0;
@@ -175,6 +190,8 @@ function blockOnContact(w: World, u: Unit, vx: number, vy: number): [number, num
 
 function advance(w: World, u: Unit, dt: number): void {
   const target = waypoint(u);
+  const fromX = u.x;
+  const fromY = u.y;
   let ax = 0;
   let ay = 0;
   const speed = speedOf(w, u);
@@ -240,6 +257,32 @@ function advance(w: World, u: Unit, dt: number): void {
   }
   u.x = Math.min(Math.max(u.x, 8), w.map.worldW - 8);
   u.y = Math.min(Math.max(u.y, 8), w.map.worldH - 8);
+
+  // A unit held up by a fight is not stuck, it is busy.
+  const moved = Math.hypot(u.x - fromX, u.y - fromY);
+  if (u.path && !u.inCombat && moved < speed * dt * STUCK_PACE) u.stuck++;
+  else u.stuck = 0;
+}
+
+/**
+ * Replaces the leg the unit is on with one that goes round. Only that leg, so a
+ * route the player drew keeps its shape everywhere the obstacle is not.
+ */
+function repath(w: World, u: Unit): void {
+  u.stuck = 0;
+  const p = u.path;
+  if (!p) return;
+  const i = u.leg * 2;
+  if (i + 1 >= p.length) return;
+  // Held up by a crowd rather than by the ground: no route will help with that.
+  if (clearLine(w.map, u.x, u.y, p[i]!, p[i + 1]!)) return;
+
+  const detour = findPath(w.map, u.x, u.y, p[i]!, p[i + 1]!);
+  if (!detour || detour.length <= 2) return;
+  u.path = detour.slice(2).concat(p.slice(i + 2));
+  u.leg = 0;
+  // Walking abreast is for open ground; squeezing past a cliff is single file.
+  u.lateral = 0;
 }
 
 /** Displaces a unit, but never into a cliff or off the map. */
@@ -369,6 +412,14 @@ export function step(w: World): void {
 
   for (const u of w.units) {
     if (u.alive) advance(w, u, TICK);
+  }
+  let budget = REPATH_BUDGET;
+  for (const u of w.units) {
+    if (budget === 0) break;
+    if (u.alive && u.stuck > STUCK_TICKS) {
+      repath(w, u);
+      budget--;
+    }
   }
   resolveCombat(w, TICK);
   recover(w, TICK);
