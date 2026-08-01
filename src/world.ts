@@ -124,6 +124,29 @@ function banks(m: GameMap, ty: number): { west: number; east: number } {
   return { west: bestStart - 2, east: bestEnd + 2 };
 }
 
+/**
+ * Nobody starts inside anybody's engagement range. The banks run close together
+ * on purpose, and at a few latitudes that put a pair within fighting distance, so
+ * the match opened with a skirmish already under way and the casualty counters
+ * ticking before the player had touched anything.
+ */
+const SPAWN_CLEAR = 40;
+
+function pushClear(w: World, spot: { x: number; y: number }, side: number): { x: number; y: number } {
+  const y = spot.y;
+  let x = spot.x;
+  for (let guard = 0; guard < 8; guard++) {
+    if (!w.units.some((u) => u.side !== side && Math.hypot(u.x - x, u.y - y) < SPAWN_CLEAR)) break;
+    const next = x + (side === BLUE ? -TILE : TILE);
+    const t = terrainAt(w.map, next, y);
+    // Backing into a cliff is worse than starting a little close — a unit that
+    // spawns inside a mountain can never take a step.
+    if (t === Terrain.Mountain) break;
+    x = next;
+  }
+  return { x, y };
+}
+
 export function createWorld(): World {
   const w: World = {
     map: createMap(),
@@ -145,9 +168,9 @@ export function createWorld(): World {
     const ty = 24 + t * 177;
     const { west, east } = banks(w.map, Math.round(ty));
     const laneY = ty * TILE;
-    const b = openSpot(w, (west + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE);
+    const b = pushClear(w, openSpot(w, (west + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE), BLUE);
     spawn(w, BLUE, b.x, b.y, heavy);
-    const r = openSpot(w, (east + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE);
+    const r = pushClear(w, openSpot(w, (east + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE), RED);
     spawn(w, RED, r.x, r.y, heavy);
   }
   return w;

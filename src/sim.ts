@@ -1,10 +1,18 @@
 /**
  * Movement, combat, morale and healing.
  *
- * The rule that shapes everything: combat happens automatically on contact, and
- * whichever unit is *advancing* counts as the attacker. It deals more damage but
- * takes more and burns morale faster, which is why the guide says to avoid
- * attacking constantly — standing your ground is a real choice.
+ * Two rules shape everything.
+ *
+ * Combat happens automatically on contact, and whichever unit is *advancing*
+ * counts as the attacker: it deals more damage but takes more and burns morale
+ * faster, which is why the guide says to avoid attacking constantly — standing
+ * your ground is a real choice.
+ *
+ * And contact holds you. A unit anybody is fighting is down to a shove, so troops
+ * meet, stop and grind instead of walking through each other. That single cap is
+ * what turns the front into a line: a head-on push into a prepared line now costs
+ * three quarters of the attacking force, where before it cost three men and the
+ * attacker came out the far side.
  */
 
 import { Terrain, TERRAIN_DAMAGE, TERRAIN_SPEED, TILE, passable, terrainAt } from './terrain.ts';
@@ -18,12 +26,28 @@ export const TICK = 1 / 30;
 const SPEED = [78, 52];
 /** Contact radius, world units. */
 const RADIUS = [9, 10.5];
-/** Units closer than this shove each other apart. */
+/** Friendly units closer than this shove each other apart. */
 const SEPARATION = 17;
 /** Separation strength as a fraction of walking speed. */
 const SEPARATION_FORCE = 0.75;
 /** Base damage per second at full health and morale. */
 const DAMAGE = [0.115, 0.2];
+
+/**
+ * Frontage a unit fights across, on top of the two bodies' radii. Fighting starts
+ * here, not at touching distance — in the original two units trading blows stand
+ * about their own width apart rather than merged into one dot.
+ */
+const ENGAGE_GAP = 11;
+/** All a unit can manage while somebody is fighting it, world units per second. */
+const PRESS_SPEED = 6;
+/**
+ * Share of an overlap the *advancing* unit gives up. Bodies are solid — nobody
+ * ends a tick standing inside anybody — and the one pressing keeps its ground
+ * while the one holding gives it up, so leaning on an attack is literally how
+ * ground changes hands.
+ */
+const GIVE = 0.15;
 
 const ATTACK_DAMAGE = 1.5;
 const ATTACK_TAKEN = 1.35;
@@ -31,19 +55,25 @@ const ATTACK_MORALE_DRAIN = 0.11;
 const DEFEND_MORALE_DRAIN = 0.045;
 /** Even at zero morale a unit still fights this hard. */
 const MORALE_FLOOR = 0.25;
-/** How hard an attacker shoves the defender back, world units per second. */
-const PUSH = 16;
 /** Speed below which a unit counts as holding rather than advancing. */
-const ADVANCING_SPEED = 8;
+const ADVANCING_SPEED = 3;
 
 const HEAL_FAR = 0.05;
 const HEAL_NEAR = 0.012;
-const CITY_HEAL_MULT = 2;
 const MORALE_REGEN = 0.09;
 /** An enemy within this many world units slows healing right down. */
 const ENEMY_NEAR = 150;
-/** Standing this close to a friendly city doubles healing. */
-const CITY_RADIUS = 5 * TILE;
+
+/**
+ * Points give supply and nothing else for now: standing on one of your own heals
+ * and steadies a unit faster. They hold no ground of their own — taking one does
+ * not move the front line an inch, that still takes troops standing there.
+ */
+const SUPPLY_RADIUS = 5 * TILE;
+const SUPPLY_MULT = 2;
+/** Sole occupation takes a point. Checked twice a second; nobody is that quick. */
+const CAPTURE_RADIUS = 6 * TILE;
+const CAPTURE_EVERY = 15;
 
 /**
  * Rebuild cadence for the border, in ticks. At 30 Hz this is six times a second;
@@ -112,6 +142,37 @@ function passedWaypoint(u: Unit, target: { x: number; y: number }): boolean {
   return ((u.x - target.x) * dx + (u.y - target.y) * dy) / len > 0;
 }
 
+/** Distance at which two enemies are fighting each other. */
+function engageRange(a: Unit, b: Unit): number {
+  return RADIUS[kindIndex(a)]! + RADIUS[kindIndex(b)]! + ENGAGE_GAP;
+}
+
+/**
+ * Once anybody is fighting a unit, it can only move at a shove.
+ *
+ * The first version of this cancelled the part of the order that pointed at each
+ * enemy, which sounds right and is useless: troops stand about a body's width
+ * apart, so a unit heading for the gap between two of them has them off both
+ * shoulders, nothing of its heading points *at* either one, and it strolls
+ * through the line at full speed. Sixty-one of sixty-four did exactly that.
+ *
+ * So the cap is on speed itself and does not care where the enemy is standing.
+ * Walk into a line and you are down to a fifth of your pace with everyone in
+ * reach shooting at you, which is long enough for that to matter. Getting past
+ * people means killing them or going round, not walking between them.
+ */
+function blockOnContact(w: World, u: Unit, vx: number, vy: number): [number, number] {
+  const speed = Math.hypot(vx, vy);
+  if (speed <= PRESS_SPEED) return [vx, vy];
+  for (const o of w.units) {
+    if (!o.alive || o.side === u.side) continue;
+    if (Math.hypot(o.x - u.x, o.y - u.y) > engageRange(u, o)) continue;
+    const k = PRESS_SPEED / speed;
+    return [vx * k, vy * k];
+  }
+  return [vx, vy];
+}
+
 function advance(w: World, u: Unit, dt: number): void {
   const target = waypoint(u);
   let ax = 0;
@@ -135,10 +196,13 @@ function advance(w: World, u: Unit, dt: number): void {
     }
   }
 
+  // Own side only. Enemies are handled by the contact rule above and by the hard
+  // separation in combat; letting them into this soft push as well made a unit
+  // drift round an enemy it was supposed to be fighting.
   let sxv = 0;
   let syv = 0;
   for (const o of w.units) {
-    if (o === u || !o.alive) continue;
+    if (o === u || !o.alive || o.side !== u.side) continue;
     const dx = u.x - o.x;
     const dy = u.y - o.y;
     const d = Math.hypot(dx, dy);
@@ -157,8 +221,12 @@ function advance(w: World, u: Unit, dt: number): void {
     syv *= scale;
   }
 
-  u.vx += (ax + sxv - u.vx) * 0.3;
-  u.vy += (ay + syv - u.vy) * 0.3;
+  // The cap goes on last, over the crowd shove as well as the order. Applying it
+  // to the order alone let a unit in a melee be jostled clear of the fight at
+  // three times the speed it was allowed to walk.
+  const [tx, ty] = blockOnContact(w, u, ax + sxv, ay + syv);
+  u.vx += (tx - u.vx) * 0.3;
+  u.vy += (ty - u.vy) * 0.3;
 
   const nx = u.x + u.vx * dt;
   const ny = u.y + u.vy * dt;
@@ -172,6 +240,14 @@ function advance(w: World, u: Unit, dt: number): void {
   }
   u.x = Math.min(Math.max(u.x, 8), w.map.worldW - 8);
   u.y = Math.min(Math.max(u.y, 8), w.map.worldH - 8);
+}
+
+/** Displaces a unit, but never into a cliff or off the map. */
+function shove(w: World, u: Unit, dx: number, dy: number): void {
+  const nx = Math.min(Math.max(u.x + dx, 8), w.map.worldW - 8);
+  const ny = Math.min(Math.max(u.y + dy, 8), w.map.worldH - 8);
+  if (passable(w.map, nx, u.y)) u.x = nx;
+  if (passable(w.map, u.x, ny)) u.y = ny;
 }
 
 function resolveCombat(w: World, dt: number): void {
@@ -189,7 +265,7 @@ function resolveCombat(w: World, dt: number): void {
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const d = Math.hypot(dx, dy);
-      if (d > RADIUS[kindIndex(a)]! + RADIUS[kindIndex(b)]!) continue;
+      if (d > engageRange(a, b)) continue;
 
       a.inCombat = true;
       b.inCombat = true;
@@ -204,17 +280,17 @@ function resolveCombat(w: World, dt: number): void {
       b.hp -= aOut * dt;
       a.hp -= bOut * dt;
 
-      if (d > 1e-4) {
+      // Fighting starts at the engagement frontage, but bodies stay solid at their
+      // own radii: pressing an attack closes the gap and shoves the defender, and
+      // the two still never end up standing in the same place.
+      const solid = RADIUS[kindIndex(a)]! + RADIUS[kindIndex(b)]!;
+      if (d > 1e-4 && d < solid) {
         const ux = dx / d;
         const uy = dy / d;
-        // Attacking pushes the enemy back.
-        if (aMoving && !bMoving) {
-          b.x += ux * PUSH * dt;
-          b.y += uy * PUSH * dt;
-        } else if (bMoving && !aMoving) {
-          a.x -= ux * PUSH * dt;
-          a.y -= uy * PUSH * dt;
-        }
+        const overlap = solid - d;
+        const aShare = aMoving && !bMoving ? GIVE : bMoving && !aMoving ? 1 - GIVE : 0.5;
+        shove(w, a, -ux * overlap * aShare, -uy * overlap * aShare);
+        shove(w, b, ux * overlap * (1 - aShare), uy * overlap * (1 - aShare));
       }
     }
   }
@@ -243,23 +319,47 @@ function nearestEnemyDistance(w: World, u: Unit): number {
   return best;
 }
 
-function onFriendlyCity(w: World, u: Unit): boolean {
+/** Whether the unit is close enough to one of its own points to be in supply. */
+function inSupply(w: World, u: Unit): boolean {
   for (const c of w.map.cities) {
     if (c.owner !== u.side) continue;
-    if (Math.hypot(u.x - c.x * TILE, u.y - c.y * TILE) < CITY_RADIUS) return true;
+    if (Math.hypot(u.x - c.x * TILE, u.y - c.y * TILE) < SUPPLY_RADIUS) return true;
   }
   return false;
+}
+
+/**
+ * A point goes to whoever is standing on it with nobody contesting it. That is
+ * all taking one does: no money yet, and — deliberately — no territory. Points
+ * claim no ground of their own, so the front line is drawn by troops and only by
+ * troops, and a point deep behind the line is worth exactly its supply.
+ */
+function captureCities(w: World): void {
+  for (const c of w.map.cities) {
+    const cx = c.x * TILE;
+    const cy = c.y * TILE;
+    let blue = 0;
+    let red = 0;
+    for (const u of w.units) {
+      if (!u.alive) continue;
+      if (Math.hypot(u.x - cx, u.y - cy) > CAPTURE_RADIUS) continue;
+      if (u.side === BLUE) blue++;
+      else red++;
+    }
+    if (blue > 0 && red === 0) c.owner = BLUE;
+    else if (red > 0 && blue === 0) c.owner = RED;
+  }
 }
 
 function recover(w: World, dt: number): void {
   for (const u of w.units) {
     if (!u.alive || u.inCombat) continue;
-    u.morale = Math.min(1, u.morale + MORALE_REGEN * dt);
+    const supply = inSupply(w, u) ? SUPPLY_MULT : 1;
+    u.morale = Math.min(1, u.morale + MORALE_REGEN * supply * dt);
     if (u.hp >= 1) continue;
-    // Healing is faster away from the enemy, and doubles on your own city.
+    // Healing is faster away from the enemy, and faster again in supply.
     const far = nearestEnemyDistance(w, u) > ENEMY_NEAR;
-    const rate = (far ? HEAL_FAR : HEAL_NEAR) * (onFriendlyCity(w, u) ? CITY_HEAL_MULT : 1);
-    u.hp = Math.min(1, u.hp + rate * dt);
+    u.hp = Math.min(1, u.hp + (far ? HEAL_FAR : HEAL_NEAR) * supply * dt);
   }
 }
 
@@ -273,9 +373,10 @@ export function step(w: World): void {
   resolveCombat(w, TICK);
   recover(w, TICK);
 
+  if (w.tick % CAPTURE_EVERY === 0) captureCities(w);
   if (w.tick % 90 === 0) w.units = w.units.filter((u) => u.alive);
   if (w.tick % FRONT_EVERY === 0) {
-    w.front = computeFront(w.units, w.map.cities, w.map.worldW, w.map.worldH);
+    w.front = computeFront(w.units, w.map.worldW, w.map.worldH);
   }
 }
 

@@ -22,8 +22,6 @@
  * still belongs to somebody, so the line stays continuous from edge to edge.
  */
 
-import type { City } from './terrain.ts';
-import { TILE } from './terrain.ts';
 import type { Unit } from './world.ts';
 import { BLUE } from './world.ts';
 
@@ -39,7 +37,6 @@ const CELLS = GW * GH;
  */
 const UNIT_REACH = 34;
 const HEAVY_REACH = 41;
-const CITY_REACH = 95;
 
 /** Strongest claim on each cell, 1 at a source and 0 at the edge of its reach. */
 const blueCover = new Float32Array(CELLS);
@@ -60,16 +57,18 @@ interface Source {
 const blue: Source[] = [];
 const red: Source[] = [];
 
-function collect(units: Unit[], cities: City[]): void {
+/**
+ * Troops and only troops. Points hold no ground of their own — a captured point
+ * is worth its supply and nothing else — so a city deep behind the line does not
+ * bulge the border towards it, and one taken by a raid does not tear a hole in
+ * the enemy's territory that the raid itself has not earned.
+ */
+function collect(units: Unit[]): void {
   blue.length = 0;
   red.length = 0;
   for (const u of units) {
     if (!u.alive) continue;
     (u.side === BLUE ? blue : red).push({ x: u.x, y: u.y, reach: u.heavy ? HEAVY_REACH : UNIT_REACH });
-  }
-  for (const c of cities) {
-    if (c.owner < 0) continue;
-    (c.owner === BLUE ? blue : red).push({ x: c.x * TILE, y: c.y * TILE, reach: CITY_REACH });
   }
 }
 
@@ -211,8 +210,8 @@ function contour(cw: number, ch: number): number[][] {
   return out;
 }
 
-export function computeFront(units: Unit[], cities: City[], worldW: number, worldH: number): number[][] {
-  collect(units, cities);
+export function computeFront(units: Unit[], worldW: number, worldH: number): number[][] {
+  collect(units);
   const cw = worldW / GW;
   const ch = worldH / GH;
   if (!seeded) {
