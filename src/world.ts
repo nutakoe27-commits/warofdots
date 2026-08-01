@@ -1,7 +1,10 @@
 /** World state: map, units, selection, and the orders waiting to be confirmed. */
 
-import { createMap, TILE, Terrain, terrainAt, tileAt } from './terrain.ts';
+import { TILE, Terrain, terrainAt } from './terrain.ts';
 import type { GameMap } from './terrain.ts';
+import { createMap } from './levels.ts';
+import { resetFront } from './frontline.ts';
+import type { Level } from './levels.ts';
 import { makeRng, rand, range } from './rng.ts';
 import type { Rng } from './rng.ts';
 
@@ -34,7 +37,15 @@ export interface Unit {
   stuck: number;
 }
 
+export interface Settings {
+  level: Level;
+  /** Index into DIFFICULTIES. */
+  difficulty: number;
+  perSide: number;
+}
+
 export interface World {
+  settings: Settings;
   map: GameMap;
   units: Unit[];
   rng: Rng;
@@ -44,6 +55,10 @@ export interface World {
   /** Selected unit ids (player side only). */
   selection: Set<number>;
   casualties: [number, number];
+  /** -1 while the match is running, otherwise the winning side. */
+  winner: number;
+  /** Counted up by the simulation, read and cleared by the sound layer. */
+  events: { deaths: number; captured: number };
 }
 
 let nextId = 1;
@@ -83,42 +98,6 @@ export function openSpot(w: World, x: number, y: number, spread: number): { x: n
   return { x, y };
 }
 
-const PER_SIDE = 64;
-
-/**
- * The two banks of the river at this latitude, in tiles.
- *
- * Both armies line up on their own bank, close enough to be looking at each other.
- * The border only ever sits where somebody is standing, so if the two sides start a
- * third of the map apart the line starts a sixth of the map from either of them —
- * which is exactly what it used to look like, and wrong.
- */
-function banks(m: GameMap, ty: number): { west: number; east: number } {
-  let run = -1;
-  let bestStart = -1;
-  let bestEnd = -1;
-  let bestOff = Infinity;
-  for (let x = 140; x <= 270; x++) {
-    // Bridges count as part of the river, or the span either side of one reads as
-    // two separate rivers and the banks come out on the wrong sides.
-    const t = tileAt(m, x, ty);
-    const wet = t === Terrain.Water || t === Terrain.Bridge;
-    if (wet && run < 0) run = x;
-    if (run >= 0 && (!wet || x === 270)) {
-      const end = wet ? x : x - 1;
-      const off = Math.abs((run + end) / 2 - 200);
-      if (off < bestOff) {
-        bestOff = off;
-        bestStart = run;
-        bestEnd = end;
-      }
-      run = -1;
-    }
-  }
-  if (bestStart < 0) return { west: 196, east: 204 };
-  return { west: bestStart - 2, east: bestEnd + 2 };
-}
-
 /**
  * Nobody starts inside anybody's engagement range. The banks run close together
  * on purpose, and at a few latitudes that put a pair within fighting distance, so
@@ -126,6 +105,9 @@ function banks(m: GameMap, ty: number): { west: number; east: number } {
  * ticking before the player had touched anything.
  */
 const SPAWN_CLEAR = 40;
+
+/** Gap between neighbours along the deployment line, world units. */
+const LANE_SPACING = 28;
 
 /**
  * Pins a unit to its own bank of the water at the latitude it actually ended up
@@ -138,8 +120,8 @@ const SPAWN_CLEAR = 40;
  * be cosmetic and, now that being cut off starves you, killed them.
  */
 function ownBank(w: World, spot: { x: number; y: number }, side: number): { x: number; y: number } {
-  const { west, east } = banks(w.map, Math.round(spot.y / TILE));
-  const limit = (side === BLUE ? west : east) * TILE;
+  const { blue, red } = w.settings.level.front(w.map, Math.round(spot.y / TILE));
+  const limit = (side === BLUE ? blue : red) * TILE;
   const x = side === BLUE ? Math.min(spot.x, limit) : Math.max(spot.x, limit);
   if (terrainAt(w.map, x, spot.y) === Terrain.Mountain) return spot;
   return { x, y: spot.y };
@@ -160,29 +142,46 @@ function pushClear(w: World, spot: { x: number; y: number }, side: number): { x:
   return { x, y };
 }
 
-export function createWorld(): World {
+export function createWorld(settings: Settings): World {
+  resetFront();
+  const level = settings.level;
   const w: World = {
-    map: createMap(),
+    settings,
+    map: createMap(level),
     units: [],
-    rng: makeRng(11),
+    rng: makeRng(level.seed ^ 0x5eed),
     front: [],
     tick: 0,
     time: 0,
     selection: new Set(),
     casualties: [0, 0],
+    winner: -1,
+    events: { deaths: 0, captured: 0 },
   };
 
-  // Both armies stand along the river, each on its own bank, so the opening frame
-  // already looks like a front: a chain of troops with the line threaded past them.
-  for (let i = 0; i < PER_SIDE; i++) {
-    const t = i / (PER_SIDE - 1);
+  // Both armies form up along the level's front, each on its own side of it, so
+  // the opening frame already looks like a battle: two lines with the border
+  // threaded between them.
+  const n = settings.perSide;
+  // Same spacing between neighbours whatever the army size, so a small army forms
+  // a short dense line rather than the full-length one with holes in it. Spread
+  // thirty-two men across a front meant for ninety-six and the gaps come out wider
+  // than the distance at which anyone can fight: the two armies walk through each
+  // other's line without touching and the battle never resolves at all.
+  const want = ((n - 1) * LANE_SPACING) / (level.h * TILE);
+  const mid = (level.span[0] + level.span[1]) / 2;
+  const half = Math.min((level.span[1] - level.span[0]) / 2, want / 2);
+  const from = mid - half;
+  const to = mid + half;
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1);
     const heavy = i % 4 === 1;
-    const ty = 24 + t * 177;
-    const { west, east } = banks(w.map, Math.round(ty));
+    const ty = (from + t * (to - from)) * level.h;
+    const line = level.front(w.map, Math.round(ty));
     const laneY = ty * TILE;
-    const b = pushClear(w, ownBank(w, openSpot(w, (west + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE), BLUE), BLUE);
+    const b = pushClear(w, ownBank(w, openSpot(w, (line.blue + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE), BLUE), BLUE);
     spawn(w, BLUE, b.x, b.y, heavy);
-    const r = pushClear(w, ownBank(w, openSpot(w, (east + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE), RED), RED);
+    const r = pushClear(w, ownBank(w, openSpot(w, (line.red + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE), RED), RED);
     spawn(w, RED, r.x, r.y, heavy);
   }
   return w;

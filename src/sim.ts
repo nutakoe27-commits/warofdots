@@ -389,6 +389,7 @@ function kill(w: World, u: Unit): void {
   u.alive = false;
   u.hp = 0;
   w.casualties[u.side]!++;
+  w.events.deaths++;
 }
 
 /**
@@ -409,8 +410,11 @@ function captureCities(w: World): void {
       if (u.side === BLUE) blue++;
       else red++;
     }
-    if (blue > 0 && red === 0) c.owner = BLUE;
-    else if (red > 0 && blue === 0) c.owner = RED;
+    const next = blue > 0 && red === 0 ? BLUE : red > 0 && blue === 0 ? RED : c.owner;
+    if (next !== c.owner) {
+      c.owner = next;
+      w.events.captured++;
+    }
   }
 }
 
@@ -436,7 +440,45 @@ function recover(w: World, dt: number): void {
   }
 }
 
+/**
+ * A side is finished when it has nobody left to give an order to.
+ *
+ * There is also a clock, because two armies that decline to close can otherwise
+ * grind indefinitely and the game would have no way back to the menu. Fifteen
+ * minutes is far longer than a battle that is going anywhere takes; on time it
+ * goes to whoever has more left standing, and to points if even that is level.
+ */
+const TIME_LIMIT = 15 * 60;
+
+function sideStrength(w: World, side: number): number {
+  let s = 0;
+  for (const u of w.units) if (u.alive && u.side === side) s += (u.heavy ? 1.5 : 1) * u.hp;
+  return s;
+}
+
+function checkOver(w: World): void {
+  if (w.winner >= 0) return;
+  const blue = troopCount(w, BLUE);
+  const red = troopCount(w, RED);
+  if (blue === 0 || red === 0) {
+    w.winner = red === 0 && blue > 0 ? BLUE : RED;
+    return;
+  }
+  if (w.time < TIME_LIMIT) return;
+
+  const sb = sideStrength(w, BLUE);
+  const sr = sideStrength(w, RED);
+  if (sb !== sr) {
+    w.winner = sb > sr ? BLUE : RED;
+    return;
+  }
+  const pb = w.map.cities.filter((c) => c.owner === BLUE).length;
+  const pr = w.map.cities.filter((c) => c.owner === RED).length;
+  w.winner = pb >= pr ? BLUE : RED;
+}
+
 export function step(w: World): void {
+  if (w.winner >= 0) return;
   w.tick++;
   w.time += TICK;
 
@@ -455,6 +497,7 @@ export function step(w: World): void {
   recover(w, TICK);
 
   if (w.tick % CAPTURE_EVERY === 0) captureCities(w);
+  if (w.tick % 15 === 0) checkOver(w);
   if (w.tick % 90 === 0) w.units = w.units.filter((u) => u.alive);
   if (w.tick % FRONT_EVERY === 0) {
     w.front = computeFront(w.units, w.map.cities, w.map.worldW, w.map.worldH);

@@ -291,6 +291,18 @@ function contour(cw: number, ch: number): number[][] {
   return out;
 }
 
+/**
+ * Forgets the last match. The ownership grid is deliberately sticky — that is the
+ * whole mechanic — so without this a new battle would open with the territory of
+ * the previous one still painted on it.
+ */
+export function resetFront(): void {
+  seeded = false;
+  owner.fill(0);
+  supplied[0]!.fill(0);
+  supplied[1]!.fill(0);
+}
+
 export function computeFront(units: Unit[], cities: City[], worldW: number, worldH: number): number[][] {
   collect(units);
   cellW = worldW / GW;

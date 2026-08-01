@@ -1,11 +1,13 @@
 /**
- * The map: a tile grid plus the cities on it.
+ * The tile grid, the terrain rules, and the brushes for painting a map.
  *
  * Tiles are painted one pixel each into an offscreen bitmap and blown up with
  * smoothing off — that is where the stair-stepped edges of the original come from.
+ * What gets painted where is not in here: each battlefield is a script in
+ * levels.ts that calls these brushes.
  */
 
-import { makeRng, rand, range } from './rng.ts';
+import { rand, range } from './rng.ts';
 import type { Rng } from './rng.ts';
 
 export const Terrain = {
@@ -71,7 +73,7 @@ export interface GameMap {
   worldH: number;
 }
 
-function set(m: GameMap, x: number, y: number, t: TerrainId): void {
+export function set(m: GameMap, x: number, y: number, t: TerrainId): void {
   if (x < 0 || y < 0 || x >= m.w || y >= m.h) return;
   m.tiles[y * m.w + x] = t;
 }
@@ -89,7 +91,7 @@ export function passable(m: GameMap, x: number, y: number): boolean {
   return terrainAt(m, x, y) !== Terrain.Mountain;
 }
 
-function blob(m: GameMap, r: Rng, cx: number, cy: number, radius: number, t: TerrainId): void {
+export function blob(m: GameMap, r: Rng, cx: number, cy: number, radius: number, t: TerrainId): void {
   const p1 = rand(r) * Math.PI * 2;
   const p2 = rand(r) * Math.PI * 2;
   const a1 = range(r, 0.14, 0.32);
@@ -107,7 +109,7 @@ function blob(m: GameMap, r: Rng, cx: number, cy: number, radius: number, t: Ter
   }
 }
 
-function disc(m: GameMap, cx: number, cy: number, radius: number, t: TerrainId): void {
+export function disc(m: GameMap, cx: number, cy: number, radius: number, t: TerrainId): void {
   for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++) {
     for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
       if (Math.hypot(x - cx, y - cy) <= radius) set(m, x, y, t);
@@ -115,7 +117,7 @@ function disc(m: GameMap, cx: number, cy: number, radius: number, t: TerrainId):
   }
 }
 
-function meander(r: Rng, ax: number, ay: number, bx: number, by: number, amp: number): number[] {
+export function meander(r: Rng, ax: number, ay: number, bx: number, by: number, amp: number): number[] {
   let pts = [ax, ay, bx, by];
   for (let pass = 0; pass < 6; pass++) {
     const next: number[] = [pts[0]!, pts[1]!];
@@ -136,7 +138,7 @@ function meander(r: Rng, ax: number, ay: number, bx: number, by: number, amp: nu
   return pts;
 }
 
-function stampPath(m: GameMap, pts: number[], width: number, t: TerrainId): void {
+export function stampPath(m: GameMap, pts: number[], width: number, t: TerrainId): void {
   for (let i = 2; i < pts.length; i += 2) {
     const x0 = pts[i - 2]!;
     const y0 = pts[i - 1]!;
@@ -148,7 +150,7 @@ function stampPath(m: GameMap, pts: number[], width: number, t: TerrainId): void
   }
 }
 
-function bridge(m: GameMap, pts: number[], frac: number, span: number): void {
+export function bridge(m: GameMap, pts: number[], frac: number, span: number): void {
   const i = Math.max(1, Math.min(Math.floor((pts.length >> 1) * frac), (pts.length >> 1) - 1)) * 2;
   const x = pts[i]!;
   const y = pts[i + 1]!;
@@ -158,65 +160,4 @@ function bridge(m: GameMap, pts: number[], frac: number, span: number): void {
   for (let s = -span; s <= span; s += 0.5) {
     disc(m, x + (-dy / len) * s, y + (dx / len) * s, 2, Terrain.Bridge);
   }
-}
-
-export function createMap(seed = 4242): GameMap {
-  const w = 400;
-  const h = 225;
-  const m: GameMap = {
-    w,
-    h,
-    tiles: new Uint8Array(w * h).fill(Terrain.Plains),
-    cities: [],
-    worldW: w * TILE,
-    worldH: h * TILE,
-  };
-  const r = makeRng(seed);
-
-  for (const [cx, cy, rad] of [
-    [70, 40, 22],
-    [58, 176, 20],
-    [330, 52, 24],
-    [346, 180, 20],
-    [210, 26, 18],
-    [196, 200, 18],
-  ] as const) {
-    blob(m, r, cx, cy, rad, Terrain.Forest);
-  }
-
-  for (const [cx, cy, rad] of [
-    [252, 60, 30],
-    [286, 108, 24],
-    [140, 150, 26],
-    [110, 96, 20],
-    [312, 156, 20],
-  ] as const) {
-    blob(m, r, cx, cy, rad, Terrain.Hills);
-    blob(m, r, cx + range(r, -5, 5), cy + range(r, -5, 5), rad * 0.45, Terrain.Mountain);
-  }
-
-  const river = meander(r, 190, -8, 206, h + 8, 26);
-  stampPath(m, river, 8, Terrain.Water);
-  const east = meander(r, 206, 110, w + 8, 88, 24);
-  stampPath(m, east, 8, Terrain.Water);
-  bridge(m, river, 0.2, 9);
-  bridge(m, river, 0.52, 9);
-  bridge(m, river, 0.82, 9);
-  bridge(m, east, 0.4, 8);
-
-  m.cities = [
-    { x: 30, y: 112, capital: true, owner: 0 },
-    { x: 372, y: 112, capital: true, owner: 1 },
-    { x: 92, y: 56, capital: false, owner: 0 },
-    { x: 88, y: 168, capital: false, owner: 0 },
-    { x: 150, y: 108, capital: false, owner: 0 },
-    { x: 306, y: 60, capital: false, owner: 1 },
-    { x: 310, y: 170, capital: false, owner: 1 },
-    { x: 250, y: 112, capital: false, owner: 1 },
-    { x: 198, y: 40, capital: false, owner: -1 },
-    { x: 200, y: 186, capital: false, owner: -1 },
-  ];
-  for (const c of m.cities) disc(m, c.x, c.y, 4, Terrain.Plains);
-
-  return m;
 }

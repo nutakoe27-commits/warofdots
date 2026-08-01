@@ -7,6 +7,7 @@
 
 import { clamp, pan, sx, sy, wx, wy, zoomAt } from './camera.ts';
 import type { Camera } from './camera.ts';
+import { sfxOrder, sfxSelect } from './audio.ts';
 import { clearLine, findPath } from './nav.ts';
 import { TILE } from './terrain.ts';
 import { BLUE, selectedUnits } from './world.ts';
@@ -180,6 +181,8 @@ export interface InputDeps {
   world: World;
   camera: Camera;
   input: InputState;
+  /** False while a menu is up: the canvas is still there, but it is scenery. */
+  enabled: boolean;
 }
 
 export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
@@ -199,6 +202,7 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   canvas.addEventListener('pointerdown', (e) => {
+    if (!deps.enabled) return;
     const [px, py] = local(e);
     canvas.setPointerCapture(e.pointerId);
     downX = px;
@@ -223,6 +227,7 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
   });
 
   canvas.addEventListener('pointermove', (e) => {
+    if (!deps.enabled) return;
     const [px, py] = local(e);
     input.mouseX = px;
     input.mouseY = py;
@@ -242,6 +247,7 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
   });
 
   canvas.addEventListener('pointerup', (e) => {
+    if (!deps.enabled) return;
     const [px, py] = local(e);
     const moved = Math.hypot(px - downX, py - downY);
     const w = deps.world;
@@ -250,14 +256,19 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
       if (moved <= CLICK_SLOP) {
         const hit = pickUnit(w, deps.camera, px, py);
         w.selection.clear();
-        if (hit) w.selection.add(hit.id);
+        if (hit) {
+          w.selection.add(hit.id);
+          sfxSelect();
+        }
       } else {
         if (!e.shiftKey) w.selection.clear();
+        const before = w.selection.size;
         for (const u of w.units) {
           if (u.alive && u.side === BLUE && pointInPolygon(input.lasso, u.x, u.y)) {
             w.selection.add(u.id);
           }
         }
+        if (w.selection.size > before) sfxSelect();
       }
       input.lasso = [];
     } else if (input.drag === 'route') {
@@ -265,12 +276,12 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
       if (hit) {
         if (!e.shiftKey) w.selection.clear();
         w.selection.add(hit.id);
-      } else if (moved <= CLICK_SLOP) {
-        orderToPoint(w, input.hoverX, input.hoverY);
-      } else if (input.formation) {
-        orderFormation(w, startWX, startWY, input.hoverX, input.hoverY);
+        sfxSelect();
       } else {
-        orderAlongRoute(w, input.route);
+        if (moved <= CLICK_SLOP) orderToPoint(w, input.hoverX, input.hoverY);
+        else if (input.formation) orderFormation(w, startWX, startWY, input.hoverX, input.hoverY);
+        else orderAlongRoute(w, input.route);
+        if (w.selection.size > 0) sfxOrder();
       }
       input.route = [];
     }
@@ -278,6 +289,7 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
   });
 
   canvas.addEventListener('wheel', (e) => {
+    if (!deps.enabled) return;
     e.preventDefault();
     const [px, py] = local(e);
     const f = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
@@ -298,6 +310,7 @@ function pushSample(pts: number[], x: number, y: number): void {
 /** Keyboard and edge panning, applied once per frame. */
 export function updateCamera(deps: InputDeps, keys: Set<string>, dt: number): void {
   const { camera, input, world } = deps;
+  if (!deps.enabled) return;
   const step = (PAN_SPEED * dt) / camera.zoom;
   let dx = 0;
   let dy = 0;
