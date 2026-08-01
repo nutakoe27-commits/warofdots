@@ -2,7 +2,7 @@
 
 import './style.css';
 import { createWorld, pruneSelection, BLUE, RED } from './world.ts';
-import { step, TICK, troopCount } from './sim.ts';
+import { cutOffCount, step, TICK, troopCount } from './sim.ts';
 import { createCamera, clamp } from './camera.ts';
 import { attachInput, clearOrders, createInput, stopSelected, updateCamera } from './input.ts';
 import { render } from './render.ts';
@@ -57,6 +57,7 @@ function clock(seconds: number): string {
 
 function updateHud(): void {
   if (!hud) return;
+  const cut = cutOffCount(world, BLUE);
   hud.innerHTML =
     `<div class="time">${clock(world.time)}</div>` +
     `<div class="troops"><b>Войска</b>` +
@@ -65,7 +66,9 @@ function updateHud(): void {
     `<div class="losses"><b>Потери</b>` +
     `<span class="blue">${world.casualties[BLUE]}</span>` +
     `<span class="red">${world.casualties[RED]}</span></div>` +
-    `<div class="sel">Выделено: ${world.selection.size}</div>`;
+    `<div class="sel">Выделено: ${world.selection.size}` +
+    (cut ? ` · <b class="cut">без снабжения: ${cut}</b>` : '') +
+    `</div>`;
 }
 
 let last = performance.now();

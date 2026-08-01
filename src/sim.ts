@@ -16,7 +16,7 @@
  */
 
 import { Terrain, TERRAIN_DAMAGE, TERRAIN_SPEED, TILE, passable, terrainAt } from './terrain.ts';
-import { computeFront } from './frontline.ts';
+import { computeFront, inSupply } from './frontline.ts';
 import { clearLine, findPath } from './nav.ts';
 import { BLUE, RED } from './world.ts';
 import type { Unit, World } from './world.ts';
@@ -66,10 +66,17 @@ const MORALE_REGEN = 0.09;
 const ENEMY_NEAR = 150;
 
 /**
- * Points give supply and nothing else for now: standing on one of your own heals
- * and steadies a unit faster. They hold no ground of their own — taking one does
- * not move the front line an inch, that still takes troops standing there.
+ * Supply is the whole worth of a point, and it comes in two parts.
+ *
+ * Being *in* supply means you can still walk home to one of your own points
+ * without crossing the front line. It is the baseline: cut that link and a unit
+ * stops healing and starts wasting away instead, whether or not it is fighting.
+ * That is what makes closing a pocket worth doing — you do not have to kill what
+ * is inside it, only get behind it and wait.
+ *
+ * Standing *on* a point is the bonus on top: everything comes twice as fast.
  */
+const STARVE = 0.02;
 const SUPPLY_RADIUS = 5 * TILE;
 const SUPPLY_MULT = 2;
 /** Sole occupation takes a point. Checked twice a second; nobody is that quick. */
@@ -344,11 +351,7 @@ function resolveCombat(w: World, dt: number): void {
       u.morale -= (u.attacking ? ATTACK_MORALE_DRAIN : DEFEND_MORALE_DRAIN) * dt;
       u.morale = Math.max(0, u.morale);
     }
-    if (u.hp <= 0) {
-      u.alive = false;
-      u.hp = 0;
-      w.casualties[u.side]!++;
-    }
+    if (u.hp <= 0) kill(w, u);
   }
 }
 
@@ -362,13 +365,30 @@ function nearestEnemyDistance(w: World, u: Unit): number {
   return best;
 }
 
-/** Whether the unit is close enough to one of its own points to be in supply. */
-function inSupply(w: World, u: Unit): boolean {
+/** Whether the unit is standing on one of its own points. */
+function onSupplyPoint(w: World, u: Unit): boolean {
   for (const c of w.map.cities) {
     if (c.owner !== u.side) continue;
     if (Math.hypot(u.x - c.x * TILE, u.y - c.y * TILE) < SUPPLY_RADIUS) return true;
   }
   return false;
+}
+
+/** True while supplies can still reach the unit through its own territory. */
+export function supplied(u: Unit): boolean {
+  return inSupply(u.side, u.x, u.y);
+}
+
+export function cutOffCount(w: World, side: number): number {
+  let n = 0;
+  for (const u of w.units) if (u.alive && u.side === side && !supplied(u)) n++;
+  return n;
+}
+
+function kill(w: World, u: Unit): void {
+  u.alive = false;
+  u.hp = 0;
+  w.casualties[u.side]!++;
 }
 
 /**
@@ -396,13 +416,23 @@ function captureCities(w: World): void {
 
 function recover(w: World, dt: number): void {
   for (const u of w.units) {
-    if (!u.alive || u.inCombat) continue;
-    const supply = inSupply(w, u) ? SUPPLY_MULT : 1;
-    u.morale = Math.min(1, u.morale + MORALE_REGEN * supply * dt);
+    if (!u.alive) continue;
+
+    // Starving applies in a fight as well. A pocket is usually surrounded and
+    // busy, and if being busy suspended it the mechanic would never once fire.
+    if (!supplied(u)) {
+      u.hp -= STARVE * dt;
+      if (u.hp <= 0) kill(w, u);
+      continue;
+    }
+    if (u.inCombat) continue;
+
+    const depot = onSupplyPoint(w, u) ? SUPPLY_MULT : 1;
+    u.morale = Math.min(1, u.morale + MORALE_REGEN * depot * dt);
     if (u.hp >= 1) continue;
-    // Healing is faster away from the enemy, and faster again in supply.
+    // Healing is faster away from the enemy, and faster again on your own point.
     const far = nearestEnemyDistance(w, u) > ENEMY_NEAR;
-    u.hp = Math.min(1, u.hp + (far ? HEAL_FAR : HEAL_NEAR) * supply * dt);
+    u.hp = Math.min(1, u.hp + (far ? HEAL_FAR : HEAL_NEAR) * depot * dt);
   }
 }
 
@@ -427,7 +457,7 @@ export function step(w: World): void {
   if (w.tick % CAPTURE_EVERY === 0) captureCities(w);
   if (w.tick % 90 === 0) w.units = w.units.filter((u) => u.alive);
   if (w.tick % FRONT_EVERY === 0) {
-    w.front = computeFront(w.units, w.map.worldW, w.map.worldH);
+    w.front = computeFront(w.units, w.map.cities, w.map.worldW, w.map.worldH);
   }
 }
 

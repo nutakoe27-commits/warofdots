@@ -24,6 +24,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0f0b; }
 #hud .red { color: #ff8080; }
 #hud .sel { position: absolute; top: 46px; left: 0; font-size: 13px; opacity: 0.85; }
 #hud .sel b { display: inline; font-size: 13px; opacity: 1; color: #ffe000; }
+#hud .sel b.cut { color: #ff6a3d; }
 
 #hint { left: 14px; bottom: 10px; right: 14px; font-size: 12.5px; opacity: 0.6; }
 #hint b { color: #ffe000; }

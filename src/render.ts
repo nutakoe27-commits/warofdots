@@ -11,6 +11,7 @@ import { TERRAIN_COLORS, TILE } from './terrain.ts';
 import type { GameMap } from './terrain.ts';
 import { sx, sy } from './camera.ts';
 import type { Camera } from './camera.ts';
+import { inSupply } from './frontline.ts';
 import { BLUE, RED } from './world.ts';
 import type { Unit, World } from './world.ts';
 import type { InputState } from './input.ts';
@@ -33,6 +34,7 @@ const MORALE = '#3fe3f0';
 const BAR_EMPTY = '#6a6a6a';
 
 const SELECT_RING = '#ffffff';
+const CUT_OFF = '#ff6a3d';
 const PENDING = 'rgba(30,30,30,0.55)';
 const ACTIVE_PATH = 'rgba(20,20,20,0.38)';
 const LASSO = 'rgba(255,255,255,0.9)';
@@ -297,6 +299,22 @@ function drawUnits(ctx: CanvasRenderingContext2D, w: World, cam: Camera, shown: 
     ctx.arc(sx(cam, u.x + jx), sy(cam, u.y + jy), r * HEAVY_RING, 0, Math.PI * 2);
   }
   ctx.stroke();
+
+  // Cut off from supply. The front line already shows where the pocket is; this
+  // says which of the dots inside it are yours and starving, which at any zoom
+  // worth playing at is not something you can work out from the border alone.
+  ctx.strokeStyle = CUT_OFF;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  for (const u of shown) {
+    if (u.side !== BLUE || inSupply(u.side, u.x, u.y)) continue;
+    const r = Math.max(MIN_R, UNIT_R[u.heavy ? 1 : 0]! * cam.zoom) + 3;
+    ctx.moveTo(sx(cam, u.x) + r, sy(cam, u.y));
+    ctx.arc(sx(cam, u.x), sy(cam, u.y), r, 0, Math.PI * 2);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
 
   ctx.strokeStyle = SELECT_RING;
   ctx.lineWidth = 2;

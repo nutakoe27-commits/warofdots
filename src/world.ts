@@ -127,6 +127,24 @@ function banks(m: GameMap, ty: number): { west: number; east: number } {
  */
 const SPAWN_CLEAR = 40;
 
+/**
+ * Pins a unit to its own bank of the water at the latitude it actually ended up
+ * at, not the one it was aimed at.
+ *
+ * The bank was worked out for the lane, then the scatter moved the unit a couple
+ * of tiles north or south — and where the tributary joins, a couple of tiles is
+ * the difference between an eight-tile channel and a twenty-five-tile one. Four
+ * units a match landed mid-river on the wrong side of the border, which used to
+ * be cosmetic and, now that being cut off starves you, killed them.
+ */
+function ownBank(w: World, spot: { x: number; y: number }, side: number): { x: number; y: number } {
+  const { west, east } = banks(w.map, Math.round(spot.y / TILE));
+  const limit = (side === BLUE ? west : east) * TILE;
+  const x = side === BLUE ? Math.min(spot.x, limit) : Math.max(spot.x, limit);
+  if (terrainAt(w.map, x, spot.y) === Terrain.Mountain) return spot;
+  return { x, y: spot.y };
+}
+
 function pushClear(w: World, spot: { x: number; y: number }, side: number): { x: number; y: number } {
   const y = spot.y;
   let x = spot.x;
@@ -162,9 +180,9 @@ export function createWorld(): World {
     const ty = 24 + t * 177;
     const { west, east } = banks(w.map, Math.round(ty));
     const laneY = ty * TILE;
-    const b = pushClear(w, openSpot(w, (west + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE), BLUE);
+    const b = pushClear(w, ownBank(w, openSpot(w, (west + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE), BLUE), BLUE);
     spawn(w, BLUE, b.x, b.y, heavy);
-    const r = pushClear(w, openSpot(w, (east + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE), RED);
+    const r = pushClear(w, ownBank(w, openSpot(w, (east + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE), RED), RED);
     spawn(w, RED, r.x, r.y, heavy);
   }
   return w;

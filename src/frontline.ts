@@ -22,6 +22,8 @@
  * still belongs to somebody, so the line stays continuous from edge to edge.
  */
 
+import type { City } from './terrain.ts';
+import { TILE } from './terrain.ts';
 import type { Unit } from './world.ts';
 import { BLUE } from './world.ts';
 
@@ -46,6 +48,11 @@ const owner = new Uint8Array(CELLS);
 /** Ownership as ±1, blurred, so marching squares gives curves and not a staircase. */
 const sign = new Float32Array(CELLS);
 const tmp = new Float32Array(CELLS);
+/** Per side: ground you can walk home over without leaving your own territory. */
+const supplied = [new Uint8Array(CELLS), new Uint8Array(CELLS)];
+const queue = new Int32Array(CELLS);
+let cellW = 1;
+let cellH = 1;
 let seeded = false;
 
 interface Source {
@@ -147,6 +154,68 @@ function capture(cw: number, ch: number): void {
   }
 }
 
+/**
+ * Which ground each side can still get supplies to: everything reachable from one
+ * of its own points without crossing the front line.
+ *
+ * Points are flood *sources* here and nothing else — they still claim no
+ * territory of their own, so taking one does not move the border. What it does is
+ * feed whatever is connected to it, and that is what makes a pocket a pocket: the
+ * border closes behind a unit, the walk home now crosses enemy ground, and
+ * nothing reaches it any more.
+ */
+function floodSupply(cities: City[]): void {
+  for (let side = 0; side < 2; side++) {
+    const mark = supplied[side]!;
+    mark.fill(0);
+    let head = 0;
+    let tail = 0;
+
+    for (const c of cities) {
+      if (c.owner !== side) continue;
+      const x = Math.min(GW - 1, Math.max(0, Math.floor((c.x * TILE) / cellW)));
+      const y = Math.min(GH - 1, Math.max(0, Math.floor((c.y * TILE) / cellH)));
+      const i = y * GW + x;
+      // A point standing on ground the enemy holds is itself cut off.
+      if (owner[i] !== side || mark[i]) continue;
+      mark[i] = 1;
+      queue[tail++] = i;
+    }
+
+    while (head < tail) {
+      const i = queue[head++]!;
+      const x = i % GW;
+      if (x > 0 && owner[i - 1] === side && !mark[i - 1]) {
+        mark[i - 1] = 1;
+        queue[tail++] = i - 1;
+      }
+      if (x < GW - 1 && owner[i + 1] === side && !mark[i + 1]) {
+        mark[i + 1] = 1;
+        queue[tail++] = i + 1;
+      }
+      if (i >= GW && owner[i - GW] === side && !mark[i - GW]) {
+        mark[i - GW] = 1;
+        queue[tail++] = i - GW;
+      }
+      if (i < CELLS - GW && owner[i + GW] === side && !mark[i + GW]) {
+        mark[i + GW] = 1;
+        queue[tail++] = i + GW;
+      }
+    }
+  }
+}
+
+/**
+ * Whether supplies still reach this spot for this side. Everywhere counts as
+ * supplied until the first rebuild has run, so nobody starves on the first frame.
+ */
+export function inSupply(side: number, x: number, y: number): boolean {
+  if (!seeded) return true;
+  const cx = Math.min(GW - 1, Math.max(0, Math.floor(x / cellW)));
+  const cy = Math.min(GH - 1, Math.max(0, Math.floor(y / cellH)));
+  return supplied[side]![cy * GW + cx] === 1;
+}
+
 /** Three [1,2,1] passes: enough to round off the cell staircase, far too little to close a loop. */
 function smooth(): void {
   for (let i = 0; i < CELLS; i++) sign[i] = owner[i] === 0 ? 1 : -1;
@@ -222,16 +291,17 @@ function contour(cw: number, ch: number): number[][] {
   return out;
 }
 
-export function computeFront(units: Unit[], worldW: number, worldH: number): number[][] {
+export function computeFront(units: Unit[], cities: City[], worldW: number, worldH: number): number[][] {
   collect(units);
-  const cw = worldW / GW;
-  const ch = worldH / GH;
+  cellW = worldW / GW;
+  cellH = worldH / GH;
   if (!seeded) {
     if (blue.length === 0 || red.length === 0) return [];
-    seed(cw, ch);
+    seed(cellW, cellH);
     seeded = true;
   }
-  capture(cw, ch);
+  capture(cellW, cellH);
+  floodSupply(cities);
   smooth();
-  return contour(cw, ch);
+  return contour(cellW, cellH);
 }
