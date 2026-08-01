@@ -4,7 +4,7 @@ import { TILE, Terrain, terrainAt } from './terrain.ts';
 import type { GameMap } from './terrain.ts';
 import { createMap } from './levels.ts';
 import { resetFront } from './frontline.ts';
-import type { Level } from './levels.ts';
+import type { Level, Pt } from './levels.ts';
 import { makeRng, rand, range } from './rng.ts';
 import type { Rng } from './rng.ts';
 
@@ -86,14 +86,35 @@ function spawn(w: World, side: number, x: number, y: number, heavy: boolean): Un
   return u;
 }
 
-/** Open ground near a point — nothing should start inside a river or a cliff. */
+/**
+ * Open ground near a point — nothing may start inside a river or a cliff.
+ *
+ * Scatter first, and if that finds nothing, walk outwards in rings until it does.
+ * Random tries alone were fine while every level put its troops on a line through
+ * empty country; once a level could ask for a block on top of a fort, the sixty
+ * tries all landed in the same rock and the fallback handed back the bad spot it
+ * was given. A unit inside a mountain cannot take a single step for the rest of
+ * the match.
+ */
 export function openSpot(w: World, x: number, y: number, spread: number): { x: number; y: number } {
-  for (let i = 0; i < 60; i++) {
+  const ok = (px: number, py: number): boolean => {
+    if (px < 20 || py < 20 || px > w.map.worldW - 20 || py > w.map.worldH - 20) return false;
+    const t = terrainAt(w.map, px, py);
+    return t !== Terrain.Water && t !== Terrain.Mountain;
+  };
+  for (let i = 0; i < 40; i++) {
     const px = x + range(w.rng, -spread, spread);
     const py = y + range(w.rng, -spread, spread);
-    if (px < 20 || py < 20 || px > w.map.worldW - 20 || py > w.map.worldH - 20) continue;
-    const t = terrainAt(w.map, px, py);
-    if (t !== Terrain.Water && t !== Terrain.Mountain) return { x: px, y: py };
+    if (ok(px, py)) return { x: px, y: py };
+  }
+  for (let ring = 1; ring <= 24; ring++) {
+    const rad = ring * TILE;
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2 + ring;
+      const px = x + Math.cos(a) * rad;
+      const py = y + Math.sin(a) * rad;
+      if (ok(px, py)) return { x: px, y: py };
+    }
   }
   return { x, y };
 }
@@ -159,32 +180,59 @@ export function createWorld(settings: Settings): World {
     events: { deaths: 0, captured: 0 },
   };
 
-  // Both armies form up along the level's front, each on its own side of it, so
-  // the opening frame already looks like a battle: two lines with the border
-  // threaded between them.
   const n = settings.perSide;
-  // Same spacing between neighbours whatever the army size, so a small army forms
-  // a short dense line rather than the full-length one with holes in it. Spread
-  // thirty-two men across a front meant for ninety-six and the gaps come out wider
-  // than the distance at which anyone can fight: the two armies walk through each
-  // other's line without touching and the battle never resolves at all.
+  const shape = level.deploy ? level.deploy(w.map, level, n, w.rng) : facingLines(w, level, n);
+  // Blue and red alternate so that the same index is the same kind of unit on
+  // both sides — a level that gives one side a heavier quarter would be doing it
+  // on purpose, not by accident of iteration order.
+  for (let i = 0; i < n; i++) {
+    const heavy = i % 4 === 1;
+    const b = shape.blue[i];
+    if (b) {
+      const spot = place(w, b, BLUE);
+      spawn(w, BLUE, spot.x, spot.y, heavy);
+    }
+    const r = shape.red[i];
+    if (r) {
+      const spot = place(w, r, RED);
+      spawn(w, RED, spot.x, spot.y, heavy);
+    }
+  }
+  return w;
+}
+
+/**
+ * Puts a unit down where the level asked, nudged off water, cliffs and anybody
+ * it would start a fight with.
+ */
+function place(w: World, at: Pt, side: number): Pt {
+  return pushClear(w, openSpot(w, at.x, at.y, 1.5 * TILE), side);
+}
+
+/**
+ * The default: two lines drawn up facing each other along the level's front.
+ *
+ * Spacing between neighbours is fixed whatever the army size, so a small army
+ * forms a short dense line rather than the full-length one with holes in it.
+ * Spread thirty-two men across a front meant for ninety-six and the gaps come out
+ * wider than the distance at which anyone can fight: the two armies walk through
+ * each other's line without touching and the battle never resolves at all.
+ */
+function facingLines(w: World, level: Level, n: number): { blue: Pt[]; red: Pt[] } {
   const want = ((n - 1) * LANE_SPACING) / (level.h * TILE);
   const mid = (level.span[0] + level.span[1]) / 2;
   const half = Math.min((level.span[1] - level.span[0]) / 2, want / 2);
-  const from = mid - half;
-  const to = mid + half;
+  const blue: Pt[] = [];
+  const red: Pt[] = [];
   for (let i = 0; i < n; i++) {
     const t = n === 1 ? 0.5 : i / (n - 1);
-    const heavy = i % 4 === 1;
-    const ty = (from + t * (to - from)) * level.h;
+    const ty = (mid - half + t * 2 * half) * level.h;
     const line = level.front(w.map, Math.round(ty));
-    const laneY = ty * TILE;
-    const b = pushClear(w, ownBank(w, openSpot(w, (line.blue + range(w.rng, -2, 0)) * TILE, laneY, 2 * TILE), BLUE), BLUE);
-    spawn(w, BLUE, b.x, b.y, heavy);
-    const r = pushClear(w, ownBank(w, openSpot(w, (line.red + range(w.rng, 0, 2)) * TILE, laneY, 2 * TILE), RED), RED);
-    spawn(w, RED, r.x, r.y, heavy);
+    const by = ty * TILE;
+    blue.push(ownBank(w, { x: (line.blue + range(w.rng, -2, 0)) * TILE, y: by }, BLUE));
+    red.push(ownBank(w, { x: (line.red + range(w.rng, 0, 2)) * TILE, y: by }, RED));
   }
-  return w;
+  return { blue, red };
 }
 
 export function unitById(w: World, id: number): Unit | undefined {

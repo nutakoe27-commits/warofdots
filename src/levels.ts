@@ -26,12 +26,22 @@ export interface Front {
   red: number;
 }
 
+export interface Pt {
+  x: number;
+  y: number;
+}
+
+/** How a level puts the two armies on the ground, in world units. */
+export type Deploy = (m: GameMap, level: Level, n: number, r: Rng) => { blue: Pt[]; red: Pt[] };
+
 export interface Level {
   id: string;
   name: string;
   when: string;
   /** One line on what the ground does to the fight. */
   blurb: string;
+  /** One line on what the starting position asks of you. */
+  brief: string;
   w: number;
   h: number;
   seed: number;
@@ -40,6 +50,68 @@ export interface Level {
   front(m: GameMap, ty: number): Front;
   /** Latitudes the armies form up between, as fractions of map height. */
   span: [number, number];
+  /** Omit for two lines drawn up facing each other. */
+  deploy?: Deploy;
+}
+
+/* ------------------------------------------------------------------ shapes */
+
+/**
+ * The opening position is a big part of what a battle *is*, and for a while every
+ * one of these was the same one: two straight lines facing each other across the
+ * middle of the map. Cannae is not a line, it is a bag closing. Teutoburg is not a
+ * line, it is a column strung out along a road with the woods either side of it.
+ * Gettysburg began as neither side being deployed at all.
+ *
+ * So each shape below is a different question to answer on the first morning.
+ */
+
+/** Points spread evenly along a line, with a little scatter. */
+function file(r: Rng, from: Pt, to: Pt, n: number, jitter: number): Pt[] {
+  const out: Pt[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1);
+    out.push({
+      x: from.x + (to.x - from.x) * t + range(r, -jitter, jitter),
+      y: from.y + (to.y - from.y) * t + range(r, -jitter, jitter),
+    });
+  }
+  return out;
+}
+
+/** A solid block: `cols` files deep, filled row by row. */
+function block(r: Rng, centre: Pt, n: number, cols: number, gap: number): Pt[] {
+  const rows = Math.ceil(n / cols);
+  const out: Pt[] = [];
+  for (let i = 0; i < n; i++) {
+    const cx = i % cols;
+    const cy = Math.floor(i / cols);
+    out.push({
+      x: centre.x + (cx - (cols - 1) / 2) * gap + range(r, -4, 4),
+      y: centre.y + (cy - (rows - 1) / 2) * gap + range(r, -4, 4),
+    });
+  }
+  return out;
+}
+
+/** An arc of the given radius, `from`..`to` in radians. */
+function arc(r: Rng, centre: Pt, radius: number, from: number, to: number, n: number, jitter: number): Pt[] {
+  const out: Pt[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = from + (to - from) * (n === 1 ? 0.5 : i / (n - 1));
+    out.push({
+      x: centre.x + Math.cos(a) * radius + range(r, -jitter, jitter),
+      y: centre.y + Math.sin(a) * radius + range(r, -jitter, jitter),
+    });
+  }
+  return out;
+}
+
+/** Splits a count into `k` roughly equal parts. */
+function share(n: number, k: number): number[] {
+  const out = new Array<number>(k).fill(Math.floor(n / k));
+  for (let i = 0; i < n % k; i++) out[i]!++;
+  return out;
 }
 
 /**
@@ -125,12 +197,201 @@ function standardCities(w: number, h: number): City[] {
   ];
 }
 
+/**
+ * The Persian line overlapped the Macedonian one at both ends, and Alexander won
+ * anyway by putting everything into one wedge. So: you start massed and short,
+ * they start long and thin, and if you spread out to match their frontage you
+ * have thrown away the only advantage you have.
+ */
+const wedgeVsLine: Deploy = (m, lvl, n, r) => {
+  const midY = m.worldH / 2;
+  const reach = m.worldH * 0.42;
+  return {
+    // Well apart: sixty men converging on one block close the distance between
+    // them on their own, and any less than this and the plain has a melee on it
+    // before either side has had a chance to do anything about it.
+    blue: block(r, { x: (lvl.w / 2 - 36) * TILE, y: midY }, n, 5, 30),
+    red: file(r, { x: (lvl.w / 2 + 24) * TILE, y: midY - reach }, { x: (lvl.w / 2 + 24) * TILE, y: midY + reach }, n, 16),
+  };
+};
+
+/**
+ * Cannae: the bag. Their centre is thin and gives ground on purpose, their wings
+ * are heavy and already round your flanks. Push straight into the middle and it
+ * closes behind you — which is exactly what happened to the Romans.
+ */
+const doubleEnvelopment: Deploy = (m, lvl, n, r) => {
+  const cx = (lvl.w / 2) * TILE;
+  const cy = m.worldH * 0.45;
+  const [wingA, centre, wingB] = share(n, 3) as [number, number, number];
+  return {
+    blue: block(r, { x: cx - 190, y: cy }, n, 6, 28),
+    red: [
+      // Wing tips level with the centre rather than already behind you: the bag
+      // is something you walk into, not something you start inside.
+      ...arc(r, { x: cx + 210, y: cy }, 260, -2.3, -1.1, wingA, 18),
+      ...file(r, { x: cx + 95, y: cy - 120 }, { x: cx + 95, y: cy + 120 }, centre, 16),
+      ...arc(r, { x: cx + 210, y: cy }, 260, 1.1, 2.3, wingB, 18),
+    ],
+  };
+};
+
+/**
+ * Teutoburg: three legions strung out along a forest track, nobody deployed,
+ * ambush parties waiting in the trees on both sides. You are not in a battle
+ * yet — you are in a march, and your first job is to get out of it.
+ */
+const ambushedColumn: Deploy = (m, lvl, n, r) => {
+  const y = m.worldH / 2;
+  const x0 = m.worldW * 0.2;
+  const x1 = m.worldW * 0.72;
+  const parties = 5;
+  const each = share(n, parties);
+  const red: Pt[] = [];
+  each.forEach((k, i) => {
+    const t = (i + 0.5) / parties;
+    red.push(...block(r, { x: x0 + (x1 - x0) * t, y: y + (i % 2 ? 1 : -1) * m.worldH * 0.3 }, k, 4, 26));
+  });
+  void lvl;
+  return { blue: file(r, { x: x0, y }, { x: x1, y }, n, 22), red };
+};
+
+/**
+ * Hastings: they hold the ridge in one unbroken shield wall; you are below it in
+ * three separate divisions. Uphill into a solid line is the losing move, and
+ * finding the alternative is the level.
+ */
+const wallAndDivisions: Deploy = (m, lvl, n, r) => {
+  const mid = m.worldH / 2;
+  const reach = m.worldH * 0.36;
+  const parts = share(n, 3);
+  const blue: Pt[] = [];
+  parts.forEach((k, i) => {
+    blue.push(...block(r, { x: (lvl.w / 2 - 46) * TILE, y: mid + (i - 1) * m.worldH * 0.28 }, k, 4, 28));
+  });
+  return {
+    blue,
+    red: file(r, { x: (lvl.w / 2 + 24) * TILE, y: mid - reach }, { x: (lvl.w / 2 + 24) * TILE, y: mid + reach }, n, 12),
+  };
+};
+
+/** Agincourt: a deep column in a gap too narrow to deploy in, against a thin screen. */
+const columnInADefile: Deploy = (m, lvl, n, r) => {
+  const y = m.worldH / 2;
+  return {
+    blue: block(r, { x: (lvl.w / 2 - 34) * TILE, y }, n, 4, 26),
+    red: file(
+      r,
+      { x: (lvl.w / 2 + 16) * TILE, y: y - m.worldH * 0.17 },
+      { x: (lvl.w / 2 + 16) * TILE, y: y + m.worldH * 0.17 },
+      n,
+      20,
+    ),
+  };
+};
+
+/**
+ * Borodino: they are dug in on the high ground in separate redoubt garrisons with
+ * gaps between them, and you are massed opposite. Every one of those knots has to
+ * be taken or gone round, and going round leaves it behind you.
+ */
+const redoubts: Deploy = (m, lvl, n, r) => {
+  const posts = [0.2, 0.36, 0.52, 0.68, 0.84];
+  const each = share(n, posts.length);
+  const red: Pt[] = [];
+  posts.forEach((t, i) => {
+    red.push(...block(r, { x: (lvl.w / 2 + 22) * TILE, y: m.worldH * t }, each[i]!, 4, 26));
+  });
+  return {
+    blue: file(r, { x: (lvl.w / 2 - 20) * TILE, y: m.worldH * 0.16 }, { x: (lvl.w / 2 - 20) * TILE, y: m.worldH * 0.88 }, n, 22),
+    red,
+  };
+};
+
+/**
+ * Gettysburg was a meeting engagement: two armies walking into each other by
+ * accident, in march columns, from opposite corners. Nobody has a line yet and
+ * whoever forms one first on the good ground wins the next three days.
+ */
+const meetingEngagement: Deploy = (m, _lvl, n, r) => {
+  const halves = share(n, 2);
+  return {
+    blue: [
+      ...file(r, { x: m.worldW * 0.1, y: m.worldH * 0.12 }, { x: m.worldW * 0.3, y: m.worldH * 0.3 }, halves[0]!, 24),
+      ...file(r, { x: m.worldW * 0.08, y: m.worldH * 0.7 }, { x: m.worldW * 0.28, y: m.worldH * 0.86 }, halves[1]!, 24),
+    ],
+    red: [
+      ...file(r, { x: m.worldW * 0.9, y: m.worldH * 0.14 }, { x: m.worldW * 0.7, y: m.worldH * 0.32 }, halves[0]!, 24),
+      ...file(r, { x: m.worldW * 0.92, y: m.worldH * 0.72 }, { x: m.worldW * 0.72, y: m.worldH * 0.88 }, halves[1]!, 24),
+    ],
+  };
+};
+
+/**
+ * Verden: they sit in the forts, you come at them in waves. Feeding rank after
+ * rank into the same ground is what the battle was, and it is what loses it.
+ */
+const fortsAndWaves: Deploy = (m, lvl, n, r) => {
+  const posts = [0.24, 0.48, 0.72];
+  const each = share(n, posts.length);
+  const red: Pt[] = [];
+  posts.forEach((t, i) => red.push(...block(r, { x: (lvl.w / 2 + 26) * TILE, y: m.worldH * t }, each[i]!, 4, 27)));
+  const waves = share(n, 3);
+  const blue: Pt[] = [];
+  waves.forEach((k, i) => {
+    blue.push(...file(
+      r,
+      { x: (lvl.w / 2 - 18 - i * 16) * TILE, y: m.worldH * 0.18 },
+      { x: (lvl.w / 2 - 18 - i * 16) * TILE, y: m.worldH * 0.84 },
+      k,
+      14,
+    ));
+  });
+  return { blue, red };
+};
+
+/**
+ * Stalingrad: no line at all. Both sides hold alternating blocks, interleaved,
+ * which is what "fighting for a factory" actually looks like on a map — half your
+ * army starts cut off and it is your problem to join it up again.
+ */
+const interleavedCity: Deploy = (m, _lvl, n, r) => {
+  const rows = 8;
+  const each = share(n, rows);
+  const blue: Pt[] = [];
+  const red: Pt[] = [];
+  for (let i = 0; i < rows; i++) {
+    const y = m.worldH * (0.12 + 0.76 * (i / (rows - 1)));
+    const west = m.worldW * (i % 2 ? 0.44 : 0.52);
+    const east = m.worldW * (i % 2 ? 0.6 : 0.68);
+    blue.push(...block(r, { x: west, y }, each[i]!, 3, 26));
+    red.push(...block(r, { x: east, y }, each[i]!, 3, 26));
+  }
+  return { blue, red };
+};
+
+/**
+ * Kursk: you hold a salient — a bulge sticking into their ground, exposed on
+ * three sides — and they are drawn up round the outside of it waiting to pinch it
+ * off at the neck.
+ */
+const salient: Deploy = (m, _lvl, n, r) => {
+  const cx = m.worldW * 0.42;
+  const cy = m.worldH / 2;
+  const nose = m.worldH * 0.4;
+  return {
+    blue: arc(r, { x: cx, y: cy }, nose, -1.25, 1.25, n, 20),
+    red: arc(r, { x: cx, y: cy }, nose + 150, -1.35, 1.35, n, 20),
+  };
+};
+
 export const LEVELS: Level[] = [
   {
     id: 'gaugamela',
     name: 'Гавгамелы',
     when: '331 до н. э.',
     blurb: 'Равнина, которую Дарий приказал разровнять под колесницы. Спрятаться негде — только манёвр.',
+    brief: 'Вы — сжатый клин, они — длинная тонкая линия шире вашей. Растянетесь под них — потеряете единственное преимущество.',
     w: 460,
     h: 200,
     seed: 3310,
@@ -144,12 +405,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(460, 11),
+    deploy: wedgeVsLine,
   },
   {
     id: 'cannae',
     name: 'Канны',
     when: '216 до н. э.',
     blurb: 'Плоское поле, прижатое рекой Ауфид. Фланг упирается в воду — обойти можно только с одной стороны.',
+    brief: 'Их центр тонкий и подастся, крылья уже заходят вам за фланги. Ударите в середину — мешок закроется за спиной.',
     w: 420,
     h: 210,
     seed: 2160,
@@ -164,12 +427,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(420, 10),
+    deploy: doubleEnvelopment,
   },
   {
     id: 'teutoburg',
     name: 'Тевтобургский лес',
     when: '9 н. э.',
     blurb: 'Тесный проход между лесом и болотом. Численность здесь почти ничего не решает.',
+    brief: 'Вы растянуты в походную колонну по дороге, они группами ждут в лесу с обеих сторон. Сначала выберитесь из марша.',
     w: 360,
     h: 260,
     seed: 9009,
@@ -190,12 +455,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(360, 9),
+    deploy: ambushedColumn,
   },
   {
     id: 'hastings',
     name: 'Гастингс',
     when: '1066',
     blurb: 'Гряда Сенлак. Одна сторона стоит на холме, другая идёт вверх через болото у подножия.',
+    brief: 'Они держат гребень сплошной стеной, вы внизу тремя отдельными отрядами. В лоб на холм — проигрыш.',
     w: 380,
     h: 220,
     seed: 1066,
@@ -212,12 +479,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: (m, ty) => banksAt(m, ty, 150, 280, 4),
+    deploy: wallAndDivisions,
   },
   {
     id: 'agincourt',
     name: 'Азенкур',
     when: '1415',
     blurb: 'Узкое раскисшее поле между двумя лесами. Развернуть больше, чем влезает, невозможно.',
+    brief: 'Глубокая колонна в проходе, где негде развернуться, против тонкого заслона.',
     w: 400,
     h: 240,
     seed: 1415,
@@ -236,12 +505,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(400, 12),
+    deploy: columnInADefile,
   },
   {
     id: 'borodino',
     name: 'Бородино',
     when: '1812',
     blurb: 'Холмы, ручей Колоча и флеши на высотах. Всё решают несколько курганов.',
+    brief: 'Они засели гарнизонами на курганах с разрывами между ними. Каждый узел — брать или обходить, а обойдённый остаётся в тылу.',
     w: 420,
     h: 230,
     seed: 1812,
@@ -261,12 +532,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: (m, ty) => banksAt(m, ty, 130, 290, 3),
+    deploy: redoubts,
   },
   {
     id: 'gettysburg',
     name: 'Геттисберг',
     when: '1863',
     blurb: 'Две параллельные гряды и долина между ними. Кто держит хребет, держит бой.',
+    brief: 'Встречный бой: обе армии подходят походными колоннами из разных углов. Линии нет ни у кого — кто первым займёт гряду, тот и прав.',
     w: 400,
     h: 250,
     seed: 1863,
@@ -284,12 +557,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(400, 14),
+    deploy: meetingEngagement,
   },
   {
     id: 'verdun',
     name: 'Верден',
     when: '1916',
     blurb: 'Форты на высотах над Маасом и перепаханная снарядами земля между ними.',
+    brief: 'Они в фортах, вы подходите волнами. Гнать волну за волной в одно место — ровно то, чем этот бой и проигрывается.',
     w: 400,
     h: 240,
     seed: 1916,
@@ -311,12 +586,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(400, 13),
+    deploy: fortsAndWaves,
   },
   {
     id: 'stalingrad',
     name: 'Сталинград',
     when: '1942',
     blurb: 'Город на берегу Волги. Драться приходится квартал за кварталом, и отступать некуда.',
+    brief: 'Сплошной линии нет: кварталы держат вперемежку, ваши и их вперемешку по всей глубине.',
     w: 380,
     h: 260,
     seed: 1942,
@@ -341,12 +618,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(380, 16),
+    deploy: interleavedCity,
   },
   {
     id: 'kursk',
     name: 'Курская дуга',
     when: '1943',
     blurb: 'Открытая степь на десятки километров. Никаких укрытий — только глубина обороны.',
+    brief: 'Вы в выступе, открытом с трёх сторон; они стоят вокруг него и ждут, когда можно срезать основание.',
     w: 480,
     h: 240,
     seed: 1943,
@@ -364,12 +643,14 @@ export const LEVELS: Level[] = [
     },
     cities: (m) => standardCities(m.w, m.h),
     front: facing(480, 15),
+    deploy: salient,
   },
   {
     id: 'crossing',
     name: 'Переправа',
     when: 'без даты',
     blurb: 'Безымянная река с тремя мостами. Учебная карта: всё держится на том, кто владеет переправами.',
+    brief: 'Классика: две линии по берегам реки. Всё решают три моста.',
     w: 400,
     h: 225,
     seed: 4242,

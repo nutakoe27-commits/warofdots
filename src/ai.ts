@@ -42,6 +42,25 @@ export interface Difficulty {
   takePoints: boolean;
   /** Whether it tries to get behind a weak sector and cut it off rather than just push. */
   encircle: boolean;
+  /**
+   * Seconds it takes to work up to fighting the way it means to.
+   *
+   * Before that it is deliberately slow and cautious: it needs a much bigger
+   * local edge before it will attack, it thinks at half pace, and it will not
+   * shift troops between sectors at all. It came out far too dangerous straight
+   * off the mark — a hard opponent should be something you feel closing in, not
+   * something that has already taken half your army before you have finished
+   * looking at the map.
+   */
+  warmup: number;
+}
+
+/** Extra local superiority it demands while still warming up. */
+const OPENING_CAUTION = 0.75;
+
+/** How far through its warm-up a brain is, 0 at the first shot and 1 once wound up. */
+function wound(w: World, lvl: Difficulty): number {
+  return Math.min(1, w.time / Math.max(1, lvl.warmup));
 }
 
 export const DIFFICULTIES: Difficulty[] = [
@@ -54,6 +73,7 @@ export const DIFFICULTIES: Difficulty[] = [
     withdrawAt: 0,
     takePoints: false,
     encircle: false,
+    warmup: 300,
   },
   {
     name: 'Обычный',
@@ -64,6 +84,7 @@ export const DIFFICULTIES: Difficulty[] = [
     withdrawAt: 0,
     takePoints: true,
     encircle: false,
+    warmup: 240,
   },
   {
     name: 'Ветеран',
@@ -74,6 +95,7 @@ export const DIFFICULTIES: Difficulty[] = [
     withdrawAt: 0.35,
     takePoints: true,
     encircle: false,
+    warmup: 180,
   },
   {
     name: 'Генерал',
@@ -84,6 +106,7 @@ export const DIFFICULTIES: Difficulty[] = [
     withdrawAt: 0.4,
     takePoints: true,
     encircle: true,
+    warmup: 150,
   },
 ];
 
@@ -123,6 +146,21 @@ const HOLD_MARGIN = 0.8;
  * eight minutes looking at each other.
  */
 const HOLD_AT = 22;
+/**
+ * Where it forms up before it has warmed up: out of reach, looking at you.
+ *
+ * Warming up only ever gated *attacking*, and that turned out to miss the point.
+ * A unit holding the line still walked right up to twenty-two — inside fighting
+ * distance — so however cautious the plan claimed to be, both armies were locked
+ * together within seconds of the start and a passive player was gone inside a
+ * minute. Standing off first is what actually makes an opening quiet.
+ *
+ * It has to be a long way off, too. Sixty men all closing on the nearest enemy
+ * cannot all fit at the distance they were told to keep, so they crowd and shove
+ * each other the rest of the way in; the standoff has to be wide enough that the
+ * crowd still has room in it.
+ */
+const HOLD_STANDOFF = 230;
 
 export interface Brain {
   side: number;
@@ -254,6 +292,12 @@ function think(w: World, brain: Brain): void {
   const lvl = brain.level;
   brain.budget = SEARCH_BUDGET;
 
+  // Warming up: cautious about attacking, and not yet moving troops about.
+  const heat = wound(w, lvl);
+  const attackRatio = lvl.attackRatio + (1 - heat) * OPENING_CAUTION;
+  const concentrate = lvl.concentrate && heat > 0.45;
+  const holdAt = HOLD_AT + (1 - heat) * (HOLD_STANDOFF - HOLD_AT);
+
   const sectors = survey(w, side);
   const dir = forward(side);
 
@@ -270,7 +314,12 @@ function think(w: World, brain: Brain): void {
   // into a corner of the map to fight two men.
   let weakest = -1;
   sectors.forEach((s, i) => {
-    pushing[i] = s.own > 0 && s.own / Math.max(0.6, s.foe) > lvl.attackRatio;
+    // An empty sector is not local superiority. Dividing by a floor instead of
+    // requiring an enemy made every band the enemy did not reach into an
+    // automatic attack order, so the parts of a long line that overlapped past
+    // the other army charged in on the first minute whatever the caution setting
+    // said — which is exactly the "far too aggressive from the off" complaint.
+    pushing[i] = s.own > 0 && s.foe > 0 && s.own / s.foe > attackRatio;
     if (s.foe > 0 && (weakest < 0 || s.foe < sectors[weakest]!.foe)) weakest = i;
   });
   if (weakest < 0) weakest = 0;
@@ -332,7 +381,7 @@ function think(w: World, brain: Brain): void {
 
     const mine = Math.min(SECTORS - 1, Math.max(0, Math.floor(u.y / band)));
     // Spare men from a sector that can hold without them go to the schwerpunkt.
-    if (!u.inCombat && lvl.concentrate && mine !== weakest && spare[mine]! > 0) {
+    if (!u.inCombat && concentrate && mine !== weakest && spare[mine]! > 0) {
       spare[mine]! -= strength(u);
       const s = sectors[weakest]!;
       order(w, brain, u, s.frontX - dir * 60, s.y);
@@ -369,14 +418,14 @@ function think(w: World, brain: Brain): void {
     // stronger posture. Leave them.
     if (u.inCombat) continue;
 
-    // Close on that particular enemy along the line joining them, stopping just
-    // inside reach. Lining up on the enemy's *x* while keeping your own *y* puts
-    // you twenty units from a spot where nobody is standing, which is how three
-    // of the four difficulties managed to fight nobody for eight minutes.
+    // Close on that particular enemy along the line joining them, stopping short
+    // by the standoff. Lining up on a *band average* instead put you twenty units
+    // from a spot where nobody was standing, which is how three of the four
+    // difficulties managed to fight nobody at all for eight minutes.
     const dx = foe.x - u.x;
     const dy = foe.y - u.y;
     const d = Math.hypot(dx, dy) || 1;
-    const k = Math.max(0, d - HOLD_AT) / d;
+    const k = Math.max(0, d - holdAt) / d;
     order(w, brain, u, u.x + dx * k, u.y + dy * k);
   }
 }
@@ -384,6 +433,8 @@ function think(w: World, brain: Brain): void {
 export function runBrain(w: World, brain: Brain): void {
   if (w.winner >= 0) return;
   if (w.tick < brain.nextThink) return;
-  brain.nextThink = w.tick + brain.level.thinkEvery;
+  // Thinks at half pace to begin with and speeds up as it warms to the job.
+  const heat = wound(w, brain.level);
+  brain.nextThink = w.tick + Math.round(brain.level.thinkEvery * (2 - heat));
   think(w, brain);
 }

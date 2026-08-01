@@ -1,8 +1,20 @@
 /**
  * Mouse and keyboard.
  *
- * Orders run the instant they are given. Select, drag a route, let go, and the
- * troops are already walking it — there is nothing to confirm.
+ * Orders run the instant they are given, and the mouse button you press decides
+ * what you are doing rather than what you happen to have selected:
+ *
+ *   - **drag from a unit** — that unit walks the arrow you drew. Nothing has to
+ *     be selected first; if the unit you grabbed is part of the current
+ *     selection, the whole selection goes with it.
+ *   - **drag from open ground** — a lasso, always.
+ *   - **right button** — move the selection: click for a point, drag for a route.
+ *   - **middle button** — pan.
+ *
+ * The old scheme made a left drag mean "lasso" or "route" depending on whether
+ * anything was selected, so the same gesture did two different things and you had
+ * to remember which — and the commonest thing you want, "that man, go there", took
+ * a click and then a drag. Now it takes the drag.
  */
 
 import { clamp, pan, sx, sy, wx, wy, zoomAt } from './camera.ts';
@@ -193,6 +205,8 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
   let startWY = 0;
   let lastX = 0;
   let lastY = 0;
+  /** Whether this drag began on top of one of your own units. */
+  let grabbed = false;
 
   const local = (e: PointerEvent | WheelEvent): [number, number] => {
     const r = canvas.getBoundingClientRect();
@@ -213,17 +227,32 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
     startWY = wy(deps.camera, py);
     input.formation = e.shiftKey;
 
-    if (e.button === 1 || e.button === 2) {
+    if (e.button === 1) {
       input.drag = 'pan';
       return;
     }
-    if (deps.world.selection.size > 0) {
+    if (e.button === 2) {
       input.drag = 'route';
       input.route = [startWX, startWY];
-    } else {
-      input.drag = 'lasso';
-      input.lasso = [startWX, startWY];
+      return;
     }
+
+    // Left button. Grabbing a unit starts an order; grabbing ground starts a lasso.
+    const hit = pickUnit(deps.world, deps.camera, px, py);
+    grabbed = hit !== null;
+    if (hit) {
+      // Not already selected: this drag is about him, so make it just him.
+      if (!deps.world.selection.has(hit.id)) {
+        if (!e.shiftKey) deps.world.selection.clear();
+        deps.world.selection.add(hit.id);
+        sfxSelect();
+      }
+      input.drag = 'route';
+      input.route = [startWX, startWY];
+      return;
+    }
+    input.drag = 'lasso';
+    input.lasso = [startWX, startWY];
   });
 
   canvas.addEventListener('pointermove', (e) => {
@@ -253,13 +282,9 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
     const w = deps.world;
 
     if (input.drag === 'lasso') {
+      // A click on open ground clears; a loop round some of your own selects them.
       if (moved <= CLICK_SLOP) {
-        const hit = pickUnit(w, deps.camera, px, py);
-        w.selection.clear();
-        if (hit) {
-          w.selection.add(hit.id);
-          sfxSelect();
-        }
+        if (!e.shiftKey) w.selection.clear();
       } else {
         if (!e.shiftKey) w.selection.clear();
         const before = w.selection.size;
@@ -272,19 +297,21 @@ export function attachInput(canvas: HTMLCanvasElement, deps: InputDeps): void {
       }
       input.lasso = [];
     } else if (input.drag === 'route') {
-      const hit = moved <= CLICK_SLOP ? pickUnit(w, deps.camera, px, py) : null;
-      if (hit) {
-        if (!e.shiftKey) w.selection.clear();
-        w.selection.add(hit.id);
-        sfxSelect();
-      } else {
-        if (moved <= CLICK_SLOP) orderToPoint(w, input.hoverX, input.hoverY);
-        else if (input.formation) orderFormation(w, startWX, startWY, input.hoverX, input.hoverY);
-        else orderAlongRoute(w, input.route);
-        if (w.selection.size > 0) sfxOrder();
+      // A click that never moved and started on a unit was a selection, not an
+      // order to walk to where he is already standing.
+      if (moved <= CLICK_SLOP && grabbed) {
+        input.route = [];
+        input.drag = 'none';
+        grabbed = false;
+        return;
       }
+      if (moved <= CLICK_SLOP) orderToPoint(w, input.hoverX, input.hoverY);
+      else if (input.formation) orderFormation(w, startWX, startWY, input.hoverX, input.hoverY);
+      else orderAlongRoute(w, input.route);
+      if (w.selection.size > 0) sfxOrder();
       input.route = [];
     }
+    grabbed = false;
     input.drag = 'none';
   });
 

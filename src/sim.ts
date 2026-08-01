@@ -23,8 +23,16 @@ import type { Unit, World } from './world.ts';
 
 export const TICK = 1 / 30;
 
-/** World units per second. */
-const SPEED = [78, 52];
+/**
+ * World units per second.
+ *
+ * Slower than it feels like it should be. At the old pace a unit crossed the map
+ * in fifty seconds, which meant an order was stale by the time you had finished
+ * drawing the next one — you were always catching up with your own army instead
+ * of directing it. Halving it costs nothing and buys the time to actually give
+ * orders.
+ */
+const SPEED = [46, 32];
 /** Contact radius, world units. */
 const RADIUS = [9, 10.5];
 /** Friendly units closer than this shove each other apart. */
@@ -41,7 +49,7 @@ const DAMAGE = [0.115, 0.2];
  */
 const ENGAGE_GAP = 11;
 /** All a unit can manage while somebody is fighting it, world units per second. */
-const PRESS_SPEED = 6;
+const PRESS_SPEED = 4;
 /**
  * Share of an overlap the *advancing* unit gives up. Bodies are solid — nobody
  * ends a tick standing inside anybody — and the one pressing keeps its ground
@@ -57,7 +65,7 @@ const DEFEND_MORALE_DRAIN = 0.045;
 /** Even at zero morale a unit still fights this hard. */
 const MORALE_FLOOR = 0.25;
 /** Speed below which a unit counts as holding rather than advancing. */
-const ADVANCING_SPEED = 3;
+const ADVANCING_SPEED = 2;
 
 const HEAL_FAR = 0.05;
 const HEAL_NEAR = 0.012;

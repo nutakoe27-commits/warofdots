@@ -89,7 +89,8 @@ export function renderMenu(root: HTMLElement, onStart: (c: Choice) => void): voi
   };
 
   const levels = mk('Поле боя', 'по мотивам реальных сражений', 'grid levels');
-  pick(levels, LEVELS, (l) => l === choice.level, (l) => l.name, (l) => `${l.when} · ${l.blurb}`, (l) => {
+  pick(levels, LEVELS, (l) => l === choice.level, (l) => `${l.name} · ${l.when}`,
+    (l) => `${l.blurb}\n▸ ${l.brief}`, (l) => {
     choice.level = l;
     renderMenu(root, onStart);
   });
@@ -140,9 +141,7 @@ export function renderMenu(root: HTMLElement, onStart: (c: Choice) => void): voi
   });
   card.appendChild(go);
 
-  card.appendChild(el('p', 'foot',
-    'ЛКМ — выделить · тянуть — лассо · с выделением тянуть — маршрут · Shift+тянуть — строем · ' +
-    'C — сброс · S — стоп · колесо — зум · ПКМ/СКМ — сдвинуть · F — туман · Space — пауза · Esc — меню'));
+  card.appendChild(el('p', 'foot', 'ЛКМ по юниту и тянуть — стрелка приказа · ЛКМ по земле и тянуть — лассо · ПКМ — идти в точку, тянуть — маршрут · Shift — добавить/строем · СКМ или WASD — камера · колесо — зум · C — сброс · S — стоп · F — туман · Space — тактическая пауза (приказы работают) · Esc — меню'));
 
   root.appendChild(card);
   root.hidden = false;

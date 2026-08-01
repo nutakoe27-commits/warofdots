@@ -28,7 +28,11 @@ const hud = document.getElementById('hud')!;
 const hint = document.getElementById('hint')!;
 const screen = document.getElementById('screen')!;
 
-type Mode = 'menu' | 'playing' | 'paused' | 'over';
+/**
+ * `playing` and `frozen` are both live: the difference is only whether the clock
+ * is running. `menu` and `over` put a card up and the canvas becomes scenery.
+ */
+type Mode = 'menu' | 'playing' | 'frozen' | 'menuOverlay' | 'over';
 
 let mode: Mode = 'menu';
 let world: World | null = null;
@@ -61,7 +65,9 @@ attachInput(canvas, {
   },
   input,
   get enabled() {
-    return mode === 'playing';
+    // Orders work while frozen. Deciding what to do is the part that wants time,
+    // and taking the clock away is the only way to give it to you.
+    return mode === 'playing' || mode === 'frozen';
   },
 });
 
@@ -71,8 +77,16 @@ function clock(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-function pause(): void {
-  mode = 'paused';
+/** Stops the clock but leaves the army under your hand. */
+function freeze(on: boolean): void {
+  mode = on ? 'frozen' : 'playing';
+  if (on) setCombat(0);
+}
+
+/** The card: this one really does stop everything. */
+function openMenuOverlay(): void {
+  mode = 'menuOverlay';
+  setCombat(0);
   renderPause(screen, () => {
     mode = 'playing';
     hideScreen(screen);
@@ -140,16 +154,16 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     // Esc clears a selection first and only opens the menu when there is nothing
     // to clear, so it never yanks you out in the middle of giving an order.
-    if (mode === 'playing') {
+    if (mode === 'playing' || mode === 'frozen') {
       if (world && world.selection.size > 0) world.selection.clear();
-      else pause();
-    } else if (mode === 'paused') {
+      else openMenuOverlay();
+    } else if (mode === 'menuOverlay') {
       mode = 'playing';
       hideScreen(screen);
     }
     return;
   }
-  if (mode !== 'playing' || !world) return;
+  if ((mode !== 'playing' && mode !== 'frozen') || !world) return;
 
   keys.add(k);
   if (k === 'c') clearOrders(world);
@@ -157,7 +171,7 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'f') fogOn = !fogOn;
   else if (e.code === 'Space') {
     e.preventDefault();
-    pause();
+    freeze(mode === 'playing');
   }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
@@ -175,6 +189,7 @@ function updateHud(w: World): void {
     `<span class="red">${w.casualties[RED]}</span></div>` +
     `<div class="sel">Выделено: ${w.selection.size}` +
     (cut ? ` · <b class="cut">без снабжения: ${cut}</b>` : '') +
+    (mode === 'frozen' ? ` · <b class="frozen">ПАУЗА — приказы работают</b>` : '') +
     `</div>`;
 }
 
@@ -207,17 +222,21 @@ function frame(now: number): void {
   if (!world) return;
   const w = world;
 
-  if (mode === 'playing') {
+  if (mode === 'playing' || mode === 'frozen') {
     updateCamera({ world: w, camera, input, enabled: true }, keys, dt);
-    acc += dt;
-    let guard = 0;
-    while (acc >= TICK && guard++ < 5) {
-      if (brain) runBrain(w, brain);
-      step(w);
-      acc -= TICK;
+    if (mode === 'playing') {
+      acc += dt;
+      let guard = 0;
+      while (acc >= TICK && guard++ < 5) {
+        if (brain) runBrain(w, brain);
+        step(w);
+        acc -= TICK;
+      }
+      pruneSelection(w);
+      playEvents(w);
+    } else {
+      acc = 0;
     }
-    pruneSelection(w);
-    playEvents(w);
     updateHud(w);
     if (w.winner >= 0) finish();
   }

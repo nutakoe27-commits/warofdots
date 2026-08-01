@@ -25,6 +25,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0f0b; }
 #hud .sel { position: absolute; top: 46px; left: 0; font-size: 13px; opacity: 0.85; }
 #hud .sel b { display: inline; font-size: 13px; opacity: 1; color: #ffe000; }
 #hud .sel b.cut { color: #ff6a3d; }
+#hud .sel b.frozen { color: #7fd7ff; }
 
 #hint { left: 14px; bottom: 10px; right: 14px; font-size: 12.5px; opacity: 0.6; }
 #hint b { color: #ffe000; }
@@ -100,7 +101,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0f0b; }
 .opt.on { border-color: #ffe000; background: rgba(255, 224, 0, 0.13); }
 .opt b { display: block; font-size: 15px; font-weight: 600; }
 .opt.on b { color: #ffe000; }
-.opt span { display: block; font-size: 12.5px; opacity: 0.6; line-height: 1.35; margin-top: 1px; }
+.opt span { display: block; font-size: 12.5px; opacity: 0.6; line-height: 1.35; margin-top: 1px; white-space: pre-line; }
 
 .slider {
   display: flex;
